@@ -261,9 +261,9 @@ with st.expander(f"Review or edit {len(slate['rows'])} entered sides"):
         label = f"{row['team']} {signed(row['spread'])} · {row['away_team']} at {row['home_team']} · {row['total']}"
         with st.expander(label):
             with st.form(f"edit_{st.session_state.revision}_{index}"):
-                e_away = st.selectbox("Away team", adapter.teams, index=adapter.teams.index(row["away_team"]), key=f"ea_{st.session_state.revision}_{index}")
-                e_home = st.selectbox("Home team", adapter.teams, index=adapter.teams.index(row["home_team"]), key=f"eh_{st.session_state.revision}_{index}")
-                e_side = st.radio("Quoted side", ("Away", "Home"), index=0 if row["team"] == row["away_team"] else 1,
+                e_away = st.selectbox("Away team", adapter.teams, index=adapter.teams.index(adapter.canonical_team(row["away_team"])), key=f"ea_{st.session_state.revision}_{index}")
+                e_home = st.selectbox("Home team", adapter.teams, index=adapter.teams.index(adapter.canonical_team(row["home_team"])), key=f"eh_{st.session_state.revision}_{index}")
+                e_side = st.radio("Quoted side", ("Away", "Home"), index=0 if adapter.canonical_team(row["team"]) == adapter.canonical_team(row["away_team"]) else 1,
                                   horizontal=True, key=f"es_{st.session_state.revision}_{index}")
                 e_spread = st.text_input("Spread · keep sign and half point", value=row["spread"], key=f"esp_{st.session_state.revision}_{index}")
                 e_total = st.text_input("Game total", value=row["total"], key=f"et_{st.session_state.revision}_{index}")

@@ -104,3 +104,20 @@ def test_invalid_line_is_rejected(field, value):
     slate["rows"][0][field] = value
     with pytest.raises(ValueError):
         adapter.grade(slate)
+
+
+def test_invalid_matchup_metadata_is_rejected_without_model_calculation():
+    adapter = TeaserModelAdapter()
+    slate, _ = adapter.week2_example()
+    slate = deepcopy(slate)
+    same_game = next(row for row in slate["rows"] if row["team"] == "GB")
+    same_game["kickoff"] = "2026-09-22T13:00:00-04:00"
+    with pytest.raises(ValueError, match="kickoff conflicts"):
+        adapter.grade(slate)
+    slate, _ = adapter.week2_example()
+    slate = deepcopy(slate)
+    slate["rows"].append({"away_team": "TB", "home_team": "BUF", "team": "BUF",
+                           "spread": "+2.5", "total": "42.5",
+                           "kickoff": slate["rows"][0]["kickoff"]})
+    with pytest.raises(ValueError, match="appears in two matchups"):
+        adapter.grade(slate)

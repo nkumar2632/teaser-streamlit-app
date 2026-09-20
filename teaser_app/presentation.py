@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from html import escape
 
 
@@ -10,7 +10,13 @@ def signed(value: object) -> str:
     raw = str(value)
     if raw in {"", "UNAVAILABLE"}:
         return "—"
-    number = Decimal(raw)
+    try:
+        number = Decimal(raw)
+    except InvalidOperation:
+        # Keep malformed manual input visible so validation can reject it on Build.
+        return raw
+    if not number.is_finite():
+        return raw
     return f"+{raw}" if number > 0 and not raw.startswith("+") else raw
 
 

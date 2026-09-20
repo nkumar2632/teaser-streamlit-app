@@ -27,7 +27,8 @@ def decode_slate(data: bytes) -> dict:
                            parse_float=str, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite number")))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid UTF-8 JSON slate") from exc
-    if not isinstance(slate, dict) or set(slate) != ROOT_KEYS or slate["schema_version"] != SCHEMA_VERSION:
+    if (not isinstance(slate, dict) or set(slate) != ROOT_KEYS
+            or type(slate["schema_version"]) is not int or slate["schema_version"] != SCHEMA_VERSION):
         raise ValueError("unsupported slate schema or fields")
     if not isinstance(slate["rows"], list) or len(slate["rows"]) > 64:
         raise ValueError("slate must have at most 64 sides")

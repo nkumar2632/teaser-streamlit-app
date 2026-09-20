@@ -36,6 +36,8 @@ def verify_model() -> None:
         raise ModelIntegrityError("model reference is not at the pinned commit")
     if _git("status", "--porcelain", "--untracked-files=all"):
         raise ModelIntegrityError("model reference contains changed or untracked files")
+    if _git("ls-files", "--others", "--ignored", "--exclude-standard", "--", "src"):
+        raise ModelIntegrityError("model source contains ignored files that could shadow imports")
     if _git("diff", "--name-only", "HEAD"):
         raise ModelIntegrityError("tracked model files differ from the pinned commit")
     if _git("remote", "get-url", "--push", "origin") != "DISABLED":
@@ -44,7 +46,7 @@ def verify_model() -> None:
     for name, module in tuple(sys.modules.items()):
         if name == "teaser_model_v1" or name.startswith("teaser_model_v1."):
             path = getattr(module, "__file__", None)
-            if path is not None and not Path(path).resolve().is_relative_to(source):
+            if path is None or not Path(path).resolve().is_relative_to(source):
                 raise ModelIntegrityError(f"foreign model module is already loaded: {name}")
 
 

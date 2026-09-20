@@ -74,6 +74,9 @@ class TeaserModelAdapter:
     def teams(self) -> tuple[str, ...]:
         return tuple(sorted(NFL_TEAMS))
 
+    def canonical_team(self, value: str) -> str:
+        return normalize_team(value)
+
     def _snapshots(self, slate: dict) -> tuple[MarketSnapshot, TeaserPriceSnapshot | None]:
         verify_model()
         if not isinstance(slate, dict):
@@ -86,7 +89,8 @@ class TeaserModelAdapter:
         if not isinstance(rows, list) or not 1 <= len(rows) <= 64:
             raise ValueError("enter 1 to 64 quoted sides")
         quotes = []
-        game_values: dict[str, tuple[Decimal, dict[str, Decimal]]] = {}
+        game_values: dict[str, tuple[Decimal, datetime, dict[str, Decimal]]] = {}
+        team_games: dict[str, str] = {}
         for number, row in enumerate(rows, start=1):
             if not isinstance(row, dict):
                 raise ValueError(f"side {number} must be an object")
@@ -97,17 +101,23 @@ class TeaserModelAdapter:
             total = _decimal(row.get("total"), f"side {number} total")
             kickoff = _aware(row.get("kickoff"), f"side {number} kickoff")
             game_id = f"{season}_{week:02d}_{away}_{home}"
+            for participant in (away, home):
+                if participant in team_games and team_games[participant] != game_id:
+                    raise ValueError(f"side {number}: {participant} appears in two matchups")
+                team_games[participant] = game_id
             prior = game_values.get(game_id)
             if prior is not None:
                 if prior[0] != total:
                     raise ValueError(f"side {number} total conflicts with the other side of {game_id}")
-                if team in prior[1]:
+                if prior[1] != kickoff:
+                    raise ValueError(f"side {number} kickoff conflicts with the other side of {game_id}")
+                if team in prior[2]:
                     raise ValueError(f"side {number} duplicates {team} in {game_id}")
-                if prior[1] and spread != -next(iter(prior[1].values())):
+                if prior[2] and spread != -next(iter(prior[2].values())):
                     raise ValueError(f"side {number} spread conflicts with the other side of {game_id}")
-                prior[1][team] = spread
+                prior[2][team] = spread
             else:
-                game_values[game_id] = (total, {team: spread})
+                game_values[game_id] = (total, kickoff, {team: spread})
             quotes.append(MarketQuote(
                 game_id=game_id, season=season, week=week, kickoff=kickoff,
                 home_team=home, away_team=away, team=team, spread=spread,
