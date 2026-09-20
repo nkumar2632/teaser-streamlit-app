@@ -1,0 +1,10 @@
+# Consequential decisions
+
+- **Use source live APIs directly through one adapter.** `grade_week`, `teased_board_rows`, and `recheck_card` already implement the requested boundaries. No model equations or selection rules are copied into the app.
+- **Keep source objects within one Streamlit session.** The adapter retains source cards and snapshots; the UI sees app view records and opaque IDs. This preserves precision and avoids shared mutable state across users.
+- **Treat PLACED as an operator report only.** The source's designated-placement ledger includes additional freshness, kickoff, and historical exposure gates beyond recheck. This app has no durable ledger. Session-only placement annotations therefore make no model approval claim, and proposal exposure remains separately labeled.
+- **Show proposal freshness and summary immediately.** iPhone review found that full qualifier lists could push actionable information below the fold. Compact selected-card and exposure summaries precede detail.
+- **Reject unsafe import states.** Git pin/diff checks alone do not catch an untracked source file shadowing an import. Verify untracked source files and loaded-module paths; prevent bytecode writes to the reference. Bound JSON input and escape user text.
+- **Use the original Week 2 source CSV as the regression oracle.** Source card and screenshot CSVs represent actual sportsbook inputs. Exact source model numerical outputs are captured only after the independent source run confirmed the user-supplied identities and exposure. A distinct nflverse Week 2 artifact must not be substituted.
+- **No database or deployment.** The initial workflow is local/manual; status and inputs live in browser session memory. Durable operations and deployment need a later design and explicit user approval.
+- **Do not repeat the entire source suite in the pinned checkout.** One upstream source test mutates a tracked rehearsal report even when passed a temporary output directory. The suite passed once, the integrity breach was identified, and the checkout was recreated cleanly. App contract tests and non-writing source checks can run against the clean pin.
