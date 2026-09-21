@@ -1,4 +1,4 @@
-"""Mobile-first local Streamlit interface for the pinned NFL teaser model."""
+"""Mobile-first local Streamlit interface for the pinned teaser model."""
 
 from __future__ import annotations
 
@@ -9,18 +9,22 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from teaser_app.adapter import TeaserModelAdapter
+from teaser_app.cfb_page import render_cfb_page
 from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
+from teaser_app.market_data import LocalHistory
 from teaser_app.presentation import card as html_card, h, percent, signed
+from teaser_app.strategy import NFL_TEASER
 
 
-st.set_page_config(page_title="NFL Teaser v1.0", page_icon="🏈", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Football Teasers v1.0", page_icon="🏈", layout="centered", initial_sidebar_state="collapsed")
 st.markdown((Path(__file__).parent / "teaser_app" / "styles.css").read_text(), unsafe_allow_html=True)
 
 
 def initial_slate() -> dict:
     now = datetime.now(ZoneInfo("America/Detroit"))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "league": "NFL", "source": "manual_sportsbook", "line_label": "current_pregame",
         "season": now.year,
         "week": 1,
         "sportsbook": "",
@@ -41,6 +45,11 @@ if "revision" not in st.session_state:
 
 adapter: TeaserModelAdapter = st.session_state.adapter
 slate: dict = st.session_state.slate
+
+mode = st.radio("League and model track", ("NFL · LIVE", "CFB · PAPER"), horizontal=True)
+if mode == "CFB · PAPER":
+    render_cfb_page(adapter)
+    st.stop()
 
 
 def reset_result() -> None:
@@ -96,7 +105,7 @@ def render_exposure(view) -> None:
 
 
 st.title("NFL Teaser v1.0")
-st.caption("Local manual workspace · model-estimated values · no bets are placed by this app")
+st.caption(f"{NFL_TEASER.league} | {NFL_TEASER.bet_type} | {NFL_TEASER.model_version} | {NFL_TEASER.status} · local manual workspace · no bets are placed by this app")
 
 
 view = st.session_state.get("card")
@@ -243,7 +252,9 @@ with st.expander("Slate input · season, book, prices", expanded=not bool(slate[
 if st.button("Build proposal from entered slate", type="primary", use_container_width=True):
     try:
         view = adapter.grade(slate, historical=st.session_state.origin == "historical")
-    except (ValueError, RuntimeError) as exc:
+        if st.session_state.origin != "historical":
+            LocalHistory().ingest_snapshot(slate)
+    except (ValueError, RuntimeError, OSError) as exc:
         show_error(exc)
     else:
         reset_result()
@@ -305,7 +316,8 @@ with st.expander("Import, export, or inspect verified example"):
         try:
             parsed = decode_slate(uploaded.getvalue())
             view = adapter.grade(parsed)
-        except (ValueError, RuntimeError) as exc:
+            LocalHistory().ingest_snapshot(parsed)
+        except (ValueError, RuntimeError, OSError) as exc:
             show_error(exc)
         else:
             slate = parsed

@@ -2,7 +2,9 @@
 .block-container { max-width: 760px; padding-top: 1.2rem; padding-bottom: 4rem; }
 html, body, [data-testid="stApp"] { overflow-x: hidden; }
 [data-testid="stFormSubmitButton"] button, .stButton button, .stDownloadButton button { min-height: 44px; }
-details summary { min-height: 44px; align-items: center; }
+[data-testid="stExpander"] summary { min-height: 44px !important; align-items: center; }
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+[data-testid="stSelectbox"] [role="combobox"] { min-height: 44px !important; }
 .teaser-card { border: 1px solid rgba(120,140,160,.35); border-radius: 14px; padding: 13px 15px; margin: 0 0 10px; background: rgba(120,140,160,.06); overflow-wrap: anywhere; }
 .teaser-card.selected { border-left: 4px solid #2c8a66; }
 .teaser-card.paper { border-left: 4px solid #8a789f; }

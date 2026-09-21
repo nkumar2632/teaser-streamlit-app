@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from teaser_app.strategy import Strategy
+
 
 def frozen_row(values: dict[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType(dict(values))
@@ -44,3 +46,25 @@ class RecheckView:
     new_price_snapshot_id: str
     rechecked_at: str
     rebuilt_card: CardView | None
+
+
+@dataclass(frozen=True)
+class PaperView:
+    run_id: str
+    strategy: Strategy
+    season: int
+    week: int
+    sportsbook: str
+    captured_at: str
+    snapshot_id: str
+    historical: bool
+    legs: tuple[Mapping[str, Any], ...]
+    qualifying_legs: tuple[Mapping[str, Any], ...]
+    secondary_legs: tuple[Mapping[str, Any], ...]
+    tickets: tuple[Mapping[str, Any], ...]
+    selected_ticket_keys: tuple[str, ...]
+    exposure: Mapping[str, int]
+
+    @property
+    def selected_tickets(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(ticket for ticket in self.tickets if ticket["selected"])

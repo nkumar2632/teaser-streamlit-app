@@ -19,3 +19,8 @@ secrets.*
 *.key
 .DS_Store
 .qa/
+market_data/normalized/*.json
+market_data/runs/*.json
+market_data/results/*.json
+market_data/raw/*
+market_data/screenshots/*

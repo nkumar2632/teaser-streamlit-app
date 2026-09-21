@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_JSON_BYTES = 131072
-ROOT_KEYS = {"schema_version", "season", "week", "sportsbook", "captured_at", "prices", "rows"}
+ROOT_KEYS_V1 = {"schema_version", "season", "week", "sportsbook", "captured_at", "prices", "rows"}
+ROOT_KEYS_V2 = ROOT_KEYS_V1 | {"league", "source", "line_label"}
 ROW_KEYS = {"away_team", "home_team", "team", "spread", "total", "kickoff"}
 
 
@@ -27,9 +28,15 @@ def decode_slate(data: bytes) -> dict:
                            parse_float=str, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite number")))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid UTF-8 JSON slate") from exc
-    if (not isinstance(slate, dict) or set(slate) != ROOT_KEYS
-            or type(slate["schema_version"]) is not int or slate["schema_version"] != SCHEMA_VERSION):
+    if not isinstance(slate, dict) or type(slate.get("schema_version")) is not int:
         raise ValueError("unsupported slate schema or fields")
+    version = slate["schema_version"]
+    if (version == 1 and set(slate) != ROOT_KEYS_V1) or (version == 2 and set(slate) != ROOT_KEYS_V2) or version not in {1, 2}:
+        raise ValueError("unsupported slate schema or fields")
+    if version == 2 and (slate["league"] not in {"NFL", "CFB"} or
+                         slate["source"] not in {"manual_sportsbook", "user_screenshot", "reference_source", "future_odds_api"} or
+                         slate["line_label"] not in {"current_pregame", "archived_pregame_reference", "true_timestamped_pregame"}):
+        raise ValueError("invalid league or provenance")
     if not isinstance(slate["rows"], list) or len(slate["rows"]) > 64:
         raise ValueError("slate must have at most 64 sides")
     if any(not isinstance(row, dict) or set(row) != ROW_KEYS for row in slate["rows"]):
