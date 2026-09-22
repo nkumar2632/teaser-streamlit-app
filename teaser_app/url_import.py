@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import streamlit as st
 
@@ -12,16 +15,37 @@ from teaser_app.url_ingest import URLIngestError, preview_url, save_confirmed_sn
 EDIT_COLUMNS = ("source_event_id", "away_team", "home_team", "kickoff", "sportsbook", *ODDS_FIELDS)
 
 
+def espn_preset_url(league: str, today: date | None = None) -> str:
+    """Fetch the next standard game day rather than ESPN's sometimes settled default week."""
+    day = today or datetime.now(ZoneInfo("America/Detroit")).date()
+    if league not in {"NFL", "CFB"}:
+        raise ValueError("unsupported ESPN preset league")
+    target = 6 if league == "NFL" else 5  # Sunday or Saturday
+    game_day = day + timedelta(days=(target - day.weekday()) % 7)
+    path = "nfl" if league == "NFL" else "college-football"
+    extra = "&groups=80" if league == "CFB" else ""
+    return f"https://www.espn.com/{path}/scoreboard?dates={game_day:%Y%m%d}{extra}"
+
+
 def render_url_import() -> None:
     with st.expander("Import public reference lines by URL"):
         st.caption("ESPN NFL/college-football scoreboard URLs only. Public reference lines are separate from your actual sportsbook slate; importing never builds a model card.")
         url = st.text_input("Public scoreboard URL", placeholder="https://www.espn.com/nfl/scoreboard/_/week/3/year/2026/seasontype/2")
-        if st.button("Fetch Lines", width="stretch"):
+        nfl, cfb = st.columns(2)
+        with nfl:
+            nfl_preset = st.button("Fetch ESPN NFL", width="stretch")
+        with cfb:
+            cfb_preset = st.button("Fetch ESPN CFB", width="stretch")
+        st.caption("Presets target the next NFL Sunday or CFB Saturday. Use a dated URL for other game days.")
+        manual_fetch = st.button("Fetch Lines", width="stretch")
+        requested_url = (espn_preset_url("NFL") if nfl_preset else
+                         espn_preset_url("CFB") if cfb_preset else url if manual_fetch else None)
+        if requested_url is not None:
             st.session_state.pop("url_preview", None)
             st.session_state.pop("url_saved_snapshot", None)
             st.session_state.pop("url_review_table", None)
             try:
-                st.session_state.url_preview = preview_url(url)
+                st.session_state.url_preview = preview_url(requested_url)
             except URLIngestError as exc:
                 st.error(str(exc))
             else:

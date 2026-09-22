@@ -31,3 +31,15 @@ market columns plus `market_role: REFERENCE`, `source_type: url`, `source_provid
 confirmed values). Missing odds and teaser payouts are `null`. An ESPN URL
 snapshot is never an execution-market slate. The v1 format and IDs remain
 readable unchanged; multiple v2 snapshots can reference the same event.
+
+Newly saved version-2 manual snapshots retain the same market columns and add
+`market_role`, `source_type`, `source_provider`, and `source_url` (the last two
+remain `null` for manual entry). An identified `manual_sportsbook` source with
+book is `EXECUTION`; explicit reference-source records are `REFERENCE`;
+uncertain screenshot transcription is `UNCLASSIFIED`. Existing v1 files are
+never rewritten: old source-less records remain unclassified, while an old
+record with explicit manual-sportsbook provenance and book can be read as
+execution. Role-filtered history and comparison are read-only. Matching uses
+league, exact or explicitly registered team aliases, home/away orientation,
+and kickoff within 15 minutes; conflicts are flagged, not paired. Snapshot
+selection preserves all older records for later line-history work.

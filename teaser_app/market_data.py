@@ -17,6 +17,22 @@ FIELDS = (
     "total", "over_price", "under_price", "teaser_2team_6pt_price",
     "teaser_3team_6pt_price",
 )
+MARKET_ROLES = frozenset({"REFERENCE", "EXECUTION", "UNCLASSIFIED"})
+
+
+def snapshot_role(record: dict) -> str:
+    """Classify old records only when their recorded provenance is conclusive."""
+    explicit = record.get("market_role")
+    if explicit in MARKET_ROLES:
+        return explicit
+    if explicit is not None:
+        return "UNCLASSIFIED"
+    source = record.get("source")
+    if source == "manual_sportsbook" and record.get("sportsbook"):
+        return "EXECUTION"
+    if source in {"reference_source", "future_odds_api", "reference_url"}:
+        return "REFERENCE"
+    return "UNCLASSIFIED"
 
 
 def _canonical(record: dict) -> bytes:
@@ -82,6 +98,15 @@ def normalize_market(slate: dict) -> dict:
                "captured_at": slate["captured_at"], "source": source,
                "line_label": slate.get("line_label"),
                "sportsbook": slate["sportsbook"], "events": ordered}
+    if slate.get("schema_version") == 2:
+        role = snapshot_role(payload)
+        payload.update(schema_version=2, market_role=role,
+                       source_type="manual_entry" if source != "user_screenshot"
+                       else "screenshot_transcription",
+                       source_provider=None, source_url=None)
+        for event in ordered:
+            event.update(market_role=role, source_type=payload["source_type"],
+                         source_provider=None, source_url=None)
     snapshot_id = _identity("mkt", payload)
     for event in ordered:
         event["snapshot_id"] = snapshot_id
@@ -105,14 +130,18 @@ class LocalHistory:
     def get_snapshot(self, snapshot_id: str) -> dict:
         return _read(self.root / "normalized", snapshot_id)
 
-    def market_history(self, *, league: str | None = None) -> list[dict]:
+    def market_history(self, *, league: str | None = None, role: str | None = None) -> list[dict]:
+        if role is not None and role not in MARKET_ROLES:
+            raise ValueError("unsupported market role")
         folder = self.root / "normalized"
         records = [json.loads(path.read_text(encoding="utf-8")) for path in folder.glob("mkt_*.json")]
-        return sorted((record for record in records if league is None or record["league"] == league),
+        return sorted((record for record in records if
+                       (league is None or record["league"] == league) and
+                       (role is None or snapshot_role(record) == role)),
                       key=lambda record: (datetime.fromisoformat(record["captured_at"]).timestamp(), record["snapshot_id"]))
 
-    def latest_market(self, league: str) -> dict | None:
-        matches = self.market_history(league=league)
+    def latest_market(self, league: str, *, role: str | None = None) -> dict | None:
+        matches = self.market_history(league=league, role=role)
         return matches[-1] if matches else None
 
     def save_run(self, record: dict) -> dict:

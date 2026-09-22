@@ -12,6 +12,7 @@ from teaser_app.adapter import TeaserModelAdapter
 from teaser_app.cfb_page import render_cfb_page
 from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
 from teaser_app.market_data import LocalHistory
+from teaser_app.market_compare_page import render_market_comparison
 from teaser_app.presentation import card as html_card, h, percent, signed
 from teaser_app.strategy import NFL_TEASER
 from teaser_app.url_import import render_url_import
@@ -49,6 +50,7 @@ slate: dict = st.session_state.slate
 
 mode = st.radio("League and model track", ("NFL · LIVE", "CFB · PAPER"), horizontal=True)
 render_url_import()
+render_market_comparison("CFB" if mode == "CFB · PAPER" else "NFL")
 if mode == "CFB · PAPER":
     render_cfb_page(adapter)
     st.stop()

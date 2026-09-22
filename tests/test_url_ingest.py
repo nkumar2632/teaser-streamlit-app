@@ -214,5 +214,31 @@ def test_streamlit_fetch_preview_requires_confirm_and_leaves_week2_intact(tmp_pa
     assert not app.session_state.get("reported_placed")
 
 
+def test_espn_presets_use_the_same_review_and_confirm_gate(tmp_path, monkeypatch):
+    import teaser_app.url_import as url_import
+    from datetime import date
+    assert url_import.espn_preset_url("NFL", date(2026, 9, 21)).endswith("dates=20260927")
+    assert url_import.espn_preset_url("CFB", date(2026, 9, 21)).endswith("dates=20260926&groups=80")
+    requested = []
+    def fixture_preview(url):
+        requested.append(url)
+        name = "espn_cfb_scoreboard.json" if "college-football" in url else "espn_nfl_scoreboard.json"
+        return preview_url(url, client=_Client(fixture(name)))
+    monkeypatch.setattr(url_import, "preview_url", fixture_preview)
+    monkeypatch.setattr(url_import, "LocalHistory", lambda: LocalHistory(tmp_path))
+    app = AppTest.from_file(APP, default_timeout=30).run()
+    next(button for button in app.button if button.label == "Fetch ESPN NFL").click().run()
+    assert requested[0] == url_import.espn_preset_url("NFL")
+    assert history_count(tmp_path) == 0
+    assert any("REVIEW REQUIRED" in item.value for item in app.warning)
+    next(button for button in app.button if button.label == "Confirm Market Snapshot").click().run()
+    assert history_count(tmp_path) == 1
+    next(button for button in app.button if button.label == "Fetch ESPN CFB").click().run()
+    assert requested[-1] == url_import.espn_preset_url("CFB")
+    assert history_count(tmp_path) == 1
+    assert any("CFB reference market" in item.value for item in app.warning)
+    assert not app.exception
+
+
 def history_count(path: Path) -> int:
     return len(list((path / "normalized").glob("*.json")))
