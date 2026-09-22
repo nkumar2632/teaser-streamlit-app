@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -216,7 +217,6 @@ def test_streamlit_fetch_preview_requires_confirm_and_leaves_week2_intact(tmp_pa
 
 def test_espn_presets_use_the_same_review_and_confirm_gate(tmp_path, monkeypatch):
     import teaser_app.url_import as url_import
-    from datetime import date
     assert url_import.espn_preset_url("NFL", date(2026, 9, 21)).endswith("dates=20260927")
     assert url_import.espn_preset_url("CFB", date(2026, 9, 21)).endswith("dates=20260926&groups=80")
     requested = []
@@ -237,6 +237,61 @@ def test_espn_presets_use_the_same_review_and_confirm_gate(tmp_path, monkeypatch
     assert requested[-1] == url_import.espn_preset_url("CFB")
     assert history_count(tmp_path) == 1
     assert any("CFB reference market" in item.value for item in app.warning)
+    assert not app.exception
+
+
+def test_dated_espn_urls_validate_league_and_calendar_date():
+    from teaser_app.url_import import espn_dated_url
+    nfl = espn_dated_url("NFL", date(2026, 9, 27))
+    cfb = espn_dated_url("CFB", date(2026, 9, 26))
+    assert nfl == "https://www.espn.com/nfl/scoreboard?dates=20260927"
+    assert cfb == "https://www.espn.com/college-football/scoreboard?dates=20260926&groups=80"
+    assert identify_provider(nfl).league == "NFL"
+    assert identify_provider(cfb).league == "CFB"
+    for league, day in (("NBA", date(2026, 9, 27)), ("NFL", "2026-09-27"),
+                        ("NFL", None), ("CFB", date(1999, 12, 31)),
+                        ("CFB", date(2101, 1, 1))):
+        with pytest.raises(URLIngestError):
+            espn_dated_url(league, day)
+
+
+def test_dated_fetch_uses_existing_review_gate_and_preserves_selected_date(tmp_path, monkeypatch):
+    import teaser_app.url_import as url_import
+    requested = []
+    def fixture_preview(url):
+        requested.append(url)
+        return preview_url(url, client=_Client(fixture("espn_cfb_scoreboard.json")))
+    monkeypatch.setattr(url_import, "preview_url", fixture_preview)
+    monkeypatch.setattr(url_import, "LocalHistory", lambda: LocalHistory(tmp_path))
+    app = AppTest.from_file(APP, default_timeout=30).run()
+    next(widget for widget in app.selectbox if widget.label == "ESPN league").set_value("CFB").run()
+    next(widget for widget in app.date_input if widget.label == "ESPN scoreboard date").set_value(date(2026, 9, 26)).run()
+    next(button for button in app.button if button.label == "Fetch ESPN Lines").click().run()
+    expected = url_import.espn_dated_url("CFB", date(2026, 9, 26))
+    assert requested == [expected]
+    assert history_count(tmp_path) == 0
+    assert app.session_state["url_preview"].spec.source_url == expected
+    assert any("REVIEW REQUIRED" in item.value for item in app.warning)
+    next(button for button in app.button if button.label == "Confirm Market Snapshot").click().run()
+    saved = app.session_state["url_saved_snapshot"]
+    assert saved["market_role"] == "REFERENCE"
+    assert saved["source_type"] == "url" and saved["source_url"] == expected
+    assert saved["fetched_url"].endswith("dates=20260926&groups=80")
+    assert history_count(tmp_path) == 1
+    assert not app.exception
+
+
+def test_dated_fetch_no_games_shows_error_and_saves_nothing(tmp_path, monkeypatch):
+    import teaser_app.url_import as url_import
+    def empty_preview(url):
+        return preview_url(url, client=_Client(b'{"events": []}'))
+    monkeypatch.setattr(url_import, "preview_url", empty_preview)
+    monkeypatch.setattr(url_import, "LocalHistory", lambda: LocalHistory(tmp_path))
+    app = AppTest.from_file(APP, default_timeout=30).run()
+    next(button for button in app.button if button.label == "Fetch ESPN Lines").click().run()
+    assert any("No games found" in item.value for item in app.error)
+    assert history_count(tmp_path) == 0
+    assert not app.session_state.get("url_preview")
     assert not app.exception
 
 

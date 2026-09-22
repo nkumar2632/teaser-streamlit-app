@@ -15,16 +15,25 @@ from teaser_app.url_ingest import URLIngestError, preview_url, save_confirmed_sn
 EDIT_COLUMNS = ("source_event_id", "away_team", "home_team", "kickoff", "sportsbook", *ODDS_FIELDS)
 
 
+def espn_dated_url(league: str, game_date: date) -> str:
+    """Build a supported public scoreboard URL from a validated calendar date."""
+    if league not in {"NFL", "CFB"}:
+        raise URLIngestError("Choose NFL or CFB")
+    if type(game_date) is not date or not 2000 <= game_date.year <= 2100:
+        raise URLIngestError("Choose a valid ESPN scoreboard date from 2000 through 2100")
+    path = "nfl" if league == "NFL" else "college-football"
+    extra = "&groups=80" if league == "CFB" else ""
+    return f"https://www.espn.com/{path}/scoreboard?dates={game_date:%Y%m%d}{extra}"
+
+
 def espn_preset_url(league: str, today: date | None = None) -> str:
     """Fetch the next standard game day rather than ESPN's sometimes settled default week."""
     day = today or datetime.now(ZoneInfo("America/Detroit")).date()
     if league not in {"NFL", "CFB"}:
-        raise ValueError("unsupported ESPN preset league")
+        raise URLIngestError("Choose NFL or CFB")
     target = 6 if league == "NFL" else 5  # Sunday or Saturday
     game_day = day + timedelta(days=(target - day.weekday()) % 7)
-    path = "nfl" if league == "NFL" else "college-football"
-    extra = "&groups=80" if league == "CFB" else ""
-    return f"https://www.espn.com/{path}/scoreboard?dates={game_day:%Y%m%d}{extra}"
+    return espn_dated_url(league, game_day)
 
 
 def render_url_import() -> None:
@@ -36,10 +45,25 @@ def render_url_import() -> None:
             nfl_preset = st.button("Fetch ESPN NFL", width="stretch")
         with cfb:
             cfb_preset = st.button("Fetch ESPN CFB", width="stretch")
-        st.caption("Presets target the next NFL Sunday or CFB Saturday. Use a dated URL for other game days.")
+        st.caption("Presets target the next NFL Sunday or CFB Saturday.")
+        dated_league = st.selectbox("ESPN league", ("NFL", "CFB"))
+        dated_day = st.date_input("ESPN scoreboard date",
+                                  value=datetime.now(ZoneInfo("America/Detroit")).date(),
+                                  min_value=date(2000, 1, 1), max_value=date(2100, 12, 31))
+        dated_fetch = st.button("Fetch ESPN Lines", width="stretch")
         manual_fetch = st.button("Fetch Lines", width="stretch")
-        requested_url = (espn_preset_url("NFL") if nfl_preset else
-                         espn_preset_url("CFB") if cfb_preset else url if manual_fetch else None)
+        requested_url = None
+        try:
+            if nfl_preset:
+                requested_url = espn_preset_url("NFL")
+            elif cfb_preset:
+                requested_url = espn_preset_url("CFB")
+            elif dated_fetch:
+                requested_url = espn_dated_url(dated_league, dated_day)
+            elif manual_fetch:
+                requested_url = url
+        except URLIngestError as exc:
+            st.error(str(exc))
         if requested_url is not None:
             st.session_state.pop("url_preview", None)
             st.session_state.pop("url_saved_snapshot", None)
