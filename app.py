@@ -14,6 +14,7 @@ from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
 from teaser_app.market_data import LocalHistory
 from teaser_app.presentation import card as html_card, h, percent, signed
 from teaser_app.strategy import NFL_TEASER
+from teaser_app.url_import import render_url_import
 
 
 st.set_page_config(page_title="Football Teasers v1.0", page_icon="🏈", layout="centered", initial_sidebar_state="collapsed")
@@ -47,6 +48,7 @@ adapter: TeaserModelAdapter = st.session_state.adapter
 slate: dict = st.session_state.slate
 
 mode = st.radio("League and model track", ("NFL · LIVE", "CFB · PAPER"), horizontal=True)
+render_url_import()
 if mode == "CFB · PAPER":
     render_cfb_page(adapter)
     st.stop()

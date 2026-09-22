@@ -96,6 +96,12 @@ class LocalHistory:
         payload = normalize_market(slate)
         return _save(self.root / "normalized", "mkt", payload)
 
+    def save_confirmed_reference(self, payload: dict) -> dict:
+        if (payload.get("schema_version") != 2 or payload.get("market_role") != "REFERENCE"
+                or payload.get("source_type") != "url" or not payload.get("events")):
+            raise ValueError("expected a confirmed URL reference snapshot")
+        return _save(self.root / "normalized", "mkt", payload)
+
     def get_snapshot(self, snapshot_id: str) -> dict:
         return _read(self.root / "normalized", snapshot_id)
 

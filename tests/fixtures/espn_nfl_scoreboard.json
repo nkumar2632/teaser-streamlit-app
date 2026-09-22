@@ -1,0 +1,41 @@
+{
+  "events": [
+    {
+      "id": "401872953", "date": "2026-09-27T17:00Z",
+      "season": {"year": 2026}, "week": {"number": 3},
+      "competitions": [{
+        "competitors": [
+          {"homeAway": "home", "team": {"displayName": "Buffalo Bills"}},
+          {"homeAway": "away", "team": {"displayName": "Los Angeles Chargers"}}
+        ],
+        "odds": [{
+          "provider": {"displayName": "DraftKings"},
+          "overUnder": 50.5,
+          "pointSpread": {
+            "home": {"close": {"line": "-7", "odds": "-110"}},
+            "away": {"close": {"line": "+7", "odds": "-110"}}
+          },
+          "moneyline": {
+            "home": {"close": {"odds": "-340"}},
+            "away": {"close": {"odds": "+270"}}
+          },
+          "total": {
+            "over": {"close": {"line": "o50.5", "odds": "-110"}},
+            "under": {"close": {"line": "u50.5", "odds": "-110"}}
+          }
+        }]
+      }]
+    },
+    {
+      "id": "401872954", "date": "2026-09-27T20:25Z",
+      "season": {"year": 2026}, "week": {"number": 3},
+      "competitions": [{
+        "competitors": [
+          {"homeAway": "home", "team": {"displayName": "Detroit Lions"}},
+          {"homeAway": "away", "team": {"displayName": "New York Jets"}}
+        ],
+        "odds": []
+      }]
+    }
+  ]
+}

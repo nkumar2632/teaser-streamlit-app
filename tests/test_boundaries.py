@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_ui_never_imports_source_model_or_calculates_model_values():
     for path in [ROOT / "app.py", *(ROOT / "teaser_app" / name for name in
-                    ("inputs.py", "presentation.py", "views.py", "cfb_page.py", "market_data.py", "paper_history.py", "strategy.py"))]:
+                    ("inputs.py", "presentation.py", "views.py", "cfb_page.py", "market_data.py", "paper_history.py", "strategy.py", "url_ingest.py", "url_import.py", "providers/espn.py"))]:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):

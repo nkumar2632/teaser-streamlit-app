@@ -1,0 +1,28 @@
+{
+  "events": [{
+    "id": "401900001", "date": "2026-09-26T19:30Z",
+    "season": {"year": 2026}, "week": {"number": 4},
+    "competitions": [{
+      "competitors": [
+        {"homeAway": "home", "team": {"displayName": "Tennessee Volunteers"}},
+        {"homeAway": "away", "team": {"displayName": "Texas Longhorns"}}
+      ],
+      "odds": [{
+        "provider": {"displayName": "DraftKings"},
+        "overUnder": 56.5,
+        "pointSpread": {
+          "home": {"close": {"line": "+4", "odds": "-112"}},
+          "away": {"close": {"line": "-4", "odds": "-108"}}
+        },
+        "moneyline": {
+          "home": {"close": {"odds": "+154"}},
+          "away": {"close": {"odds": "-185"}}
+        },
+        "total": {
+          "over": {"close": {"line": "o56.5", "odds": "-108"}},
+          "under": {"close": {"line": "u56.5", "odds": "-112"}}
+        }
+      }]
+    }]
+  }]
+}

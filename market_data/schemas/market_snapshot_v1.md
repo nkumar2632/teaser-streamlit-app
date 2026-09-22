@@ -22,4 +22,12 @@ identifies the full observed state and capture time. Files are created once in
 `LocalHistory` exposes `ingest_snapshot`, `get_snapshot`, `latest_market`, and
 `market_history`. Future providers should normalize into this record and use the
 same append-only store. The app does not yet ingest ATS, moneyline, or total
-prices, though the record reserves those fields.
+prices from manual teaser slates, though the record reserves those fields.
+
+Confirmed public URL imports use snapshot `schema_version: 2` with the same event
+market columns plus `market_role: REFERENCE`, `source_type: url`, `source_provider`,
+`source_url`, `fetched_url`, `reference_source`, `captured_at`, and per-event
+`source_event_id`, displayed `sportsbook`, and `review_changes` (fetched and
+confirmed values). Missing odds and teaser payouts are `null`. An ESPN URL
+snapshot is never an execution-market slate. The v1 format and IDs remain
+readable unchanged; multiple v2 snapshots can reference the same event.
