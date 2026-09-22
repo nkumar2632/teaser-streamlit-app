@@ -43,3 +43,17 @@ execution. Role-filtered history and comparison are read-only. Matching uses
 league, exact or explicitly registered team aliases, home/away orientation,
 and kickoff within 15 minutes; conflicts are flagged, not paired. Snapshot
 selection preserves all older records for later line-history work.
+
+Confirmed sportsbook screenshot imports use `schema_version: 3`,
+`market_role: EXECUTION`, `source_type: screenshot`, and
+`source: user_screenshot`. They retain the operator-supplied sportsbook,
+league and capture time, the local/manual extractor name, extraction warnings,
+field confidence states, conflict resolutions and review edits. Top-level
+`screenshot_provenance` contains each safe filename, MIME type, byte size,
+dimensions, upload timestamp and SHA-256 hash. Raw image bytes are not stored.
+The optional `teaser_prices.6_point` object preserves separately reviewed
+2-team and 3-team prices and mirrors them into the existing event fields;
+unrelated teaser products remain absent. Version-3 records use the same event
+IDs, role-filtered history and comparison path as earlier formats. Saving them
+does not create a model run or accounting record, and no older snapshot is
+rewritten.

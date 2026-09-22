@@ -127,6 +127,16 @@ class LocalHistory:
             raise ValueError("expected a confirmed URL reference snapshot")
         return _save(self.root / "normalized", "mkt", payload)
 
+    def save_confirmed_execution(self, payload: dict) -> dict:
+        """Persist only a human-confirmed sportsbook screenshot as EXECUTION data."""
+        if (payload.get("schema_version") != 3 or payload.get("market_role") != "EXECUTION"
+                or payload.get("source_type") != "screenshot" or not payload.get("events")
+                or any(event.get("market_role") != "EXECUTION"
+                       or event.get("source_type") != "screenshot"
+                       for event in payload["events"])):
+            raise ValueError("expected a confirmed sportsbook screenshot snapshot")
+        return _save(self.root / "normalized", "mkt", payload)
+
     def get_snapshot(self, snapshot_id: str) -> dict:
         return _read(self.root / "normalized", snapshot_id)
 
