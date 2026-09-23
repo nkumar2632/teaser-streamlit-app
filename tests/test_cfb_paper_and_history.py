@@ -157,6 +157,7 @@ def test_cfb_streamlit_smoke_shows_track_and_full_entry(tmp_path, monkeypatch):
     monkeypatch.setattr(cfb_page, "LocalHistory", lambda: LocalHistory(tmp_path))
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py", default_timeout=30).run()
     next(radio for radio in app.radio if radio.label == "League and model track").set_value("CFB · PAPER").run()
+    next(radio for radio in app.radio if radio.label == "CFB market source").set_value("Manual entry").run()
     assert not app.exception
     assert any("PAPER" in item.value and "teaser_v1.0" in item.value for item in app.caption)
     assert any(button.label == "Build PAPER card from entered slate" for button in app.button)

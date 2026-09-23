@@ -36,9 +36,9 @@ def espn_preset_url(league: str, today: date | None = None) -> str:
     return espn_dated_url(league, game_day)
 
 
-def render_url_import() -> None:
-    with st.expander("Import public reference lines by URL"):
-        st.caption("ESPN NFL/college-football scoreboard URLs only. Public reference lines are separate from your actual sportsbook slate; importing never builds a model card.")
+def render_url_import(default_league: str = "NFL") -> None:
+    with st.expander("Public Lines · fetch and review ESPN"):
+        st.caption("Fetch and confirm ESPN football lines here. A saved CFB REFERENCE slate can then build a PAPER proposal; fetching alone never builds a card.")
         url = st.text_input("Public scoreboard URL", placeholder="https://www.espn.com/nfl/scoreboard/_/week/3/year/2026/seasontype/2")
         nfl, cfb = st.columns(2)
         with nfl:
@@ -46,7 +46,8 @@ def render_url_import() -> None:
         with cfb:
             cfb_preset = st.button("Fetch ESPN CFB", width="stretch")
         st.caption("Presets target the next NFL Sunday or CFB Saturday.")
-        dated_league = st.selectbox("ESPN league", ("NFL", "CFB"))
+        dated_league = st.selectbox("ESPN league", ("NFL", "CFB"),
+                                    index=1 if default_league == "CFB" else 0)
         dated_day = st.date_input("ESPN scoreboard date",
                                   value=datetime.now(ZoneInfo("America/Detroit")).date(),
                                   min_value=date(2000, 1, 1), max_value=date(2100, 12, 31))
@@ -76,7 +77,9 @@ def render_url_import() -> None:
                 st.rerun()
         saved = st.session_state.get("url_saved_snapshot")
         if saved:
-            st.success(f"Saved immutable REFERENCE snapshot {saved['snapshot_id']} · {saved['league']} · {saved['source_provider']}. It was not applied to a betting card.")
+            next_step = (" Select it in the CFB Public lines section to build a PAPER proposal."
+                         if saved["league"] == "CFB" else "")
+            st.success(f"Saved immutable REFERENCE snapshot {saved['snapshot_id']} · {saved['league']} · {saved['source_provider']}.{next_step}")
         preview = st.session_state.get("url_preview")
         if preview is None:
             return

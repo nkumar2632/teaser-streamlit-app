@@ -14,6 +14,7 @@ from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
 from teaser_app.market_data import LocalHistory
 from teaser_app.paper_history import paper_performance, run_record
 from teaser_app.presentation import card as html_card, h, percent, signed
+from teaser_app.public_cfb import DEFAULT_TEASER_BOOK, build_cfb_public_board, prepare_cfb_reference
 from teaser_app.strategy import CFB_TEASER
 
 
@@ -46,6 +47,10 @@ def _render_board(view, history, adapter, slate: dict) -> None:
     elif slate_fingerprint(slate) != st.session_state.get("cfb_built_fingerprint"):
         st.warning("INPUTS CHANGED — this paper board uses the previous saved slate. Build again to update it.")
     st.caption(f"{view.season} · Week {view.week} · {view.sportsbook} · captured {view.captured_at}")
+    if view.run_id and slate.get("source") == "reference_source":
+        saved = history.get_run(view.run_id)
+        st.caption(f"Lines: {saved.get('lines_source', view.sportsbook)} · "
+                   f"Teaser pricing: {saved.get('menu_book', DEFAULT_TEASER_BOOK)} · PAPER")
     st.subheader("Hypothetical paper card")
     st.caption("Frozen v1.0 greedy selector applied to actual entered prices. These are hypothetical units, never placements.")
     if view.selected_tickets:
@@ -79,6 +84,9 @@ def _render_board(view, history, adapter, slate: dict) -> None:
                     f" · {h(leg['exclusion_reason'])}")
             st.markdown(html_card(h(leg["team"]), f"{h(leg['geometry_class'])} / PAPER", body),
                         unsafe_allow_html=True)
+        if view.run_id and slate.get("source") == "reference_source":
+            for game in history.get_run(view.run_id).get("excluded_games", []):
+                st.caption(f"Excluded: {game['game']} · {game['reason']} · {game['detail']}")
     with st.expander(f"Secondary research · {len(view.secondary_legs)}"):
         st.caption("Secondary geometry is research only; it never enters the paper card selector. Push-capable scores are not full win probabilities because push settlement is not modeled here.")
         for leg in view.secondary_legs:
@@ -130,6 +138,90 @@ def _render_board(view, history, adapter, slate: dict) -> None:
                     st.caption(f"{ticket['ticket_key']}: {ticket['result']}")
 
 
+def _render_public_source(history, adapter) -> None:
+    snapshots = [record for record in reversed(history.market_history(league="CFB", role="REFERENCE"))
+                 if record.get("source_type") == "url"]
+    st.subheader("Public CFB lines")
+    st.caption("Fetch and confirm ESPN CFB lines in Public Lines above, then select that saved slate here. Manual sides are not needed.")
+    if not snapshots:
+        st.info("No confirmed public CFB slate is saved yet. Fetch and review one above.")
+        return
+    by_id = {record["snapshot_id"]: record for record in snapshots}
+    chosen_id = st.selectbox("Saved public CFB slate", tuple(by_id),
+                             format_func=lambda key: (
+                                 f"{by_id[key]['captured_at']} · {by_id[key].get('source_provider') or 'ESPN'} · "
+                                 f"{by_id[key].get('sportsbook') or 'reference market'} · {key}"),
+                             key="cfb_public_choice")
+    snapshot = by_id[chosen_id]
+    season = snapshot.get("season")
+    week = snapshot.get("week")
+    if type(season) is not int or not 2000 <= season <= 2100:
+        season = int(st.number_input("CFB season for public slate", min_value=2000, max_value=2100,
+                                     value=datetime.now(ZoneInfo("America/Detroit")).year,
+                                     key="cfb_public_season"))
+    if type(week) is not int or not 1 <= week <= 20:
+        week = int(st.number_input("CFB week for public slate", min_value=1, max_value=20,
+                                   value=1, key="cfb_public_week"))
+    now = datetime.now(ZoneInfo("America/Detroit"))
+    try:
+        preview = prepare_cfb_reference(snapshot, adapter, now=now, season=season, week=week)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    with st.expander(f"Review saved public slate · {len(preview.included)} usable / {len(preview.excluded)} excluded"):
+        st.caption(f"REFERENCE · {snapshot.get('source_url') or 'ESPN'} · captured {snapshot['captured_at']}")
+        for game in preview.included:
+            st.caption(f"{game['game']} · home {signed(game['sides'][1]['spread'])} · "
+                       f"total {game['sides'][0]['total']} · {game['kickoff']}")
+        for game in preview.excluded:
+            st.warning(f"{game['game']}: {game['reason']} · {game['detail']}")
+    if st.button("Use this slate for proposal", disabled=not preview.included,
+                 key="cfb_use_public", use_container_width=True):
+        if st.session_state.get("cfb_public_snapshot_id") != chosen_id:
+            st.session_state.pop("cfb_public_prices", None)
+        st.session_state.cfb_public_snapshot_id = chosen_id
+        st.session_state.cfb_slate = preview.slate
+        st.session_state.cfb_public_slate = preview.slate
+        st.session_state.cfb_public_excluded = preview.excluded
+        st.session_state.pop("cfb_view", None)
+        st.rerun()
+    selected_id = st.session_state.get("cfb_public_snapshot_id")
+    if selected_id != chosen_id:
+        return
+    slate = st.session_state.get("cfb_public_slate", preview.slate)
+    menu_book = st.session_state.setdefault("cfb_menu_book", DEFAULT_TEASER_BOOK)
+    with st.expander("Teaser menu sportsbook", expanded=False):
+        menu_book = st.text_input("Teaser menu sportsbook setting", value=menu_book,
+                                  key="cfb_menu_book_setting").strip()
+        st.session_state.cfb_menu_book = menu_book
+    st.caption(f"Selected REFERENCE slate · Lines: {preview.lines_label} · Teaser pricing: {menu_book} · PAPER")
+    prices = dict(slate["prices"])
+    for size in ("2", "3"):
+        if prices[size]:
+            st.caption(f"{size}-team 6-point teaser price: {prices[size]} · saved for this slate")
+        else:
+            prices[size] = st.text_input(f"Missing {size}-team 6-point teaser price · optional",
+                                         value=st.session_state.get("cfb_public_prices", {}).get(size, ""),
+                                         placeholder="Leave blank if not offered",
+                                         key=f"cfb_public_menu_{size}_{chosen_id}").strip()
+    st.session_state.cfb_public_prices = prices
+    st.caption("You can build without a teaser price. That ticket size will show EV unavailable; no manual quoted sides are needed.")
+    if st.button("Build PAPER card from public slate", type="primary", use_container_width=True):
+        try:
+            paper, prepared, _ = build_cfb_public_board(
+                history, adapter, snapshot, now=datetime.now(ZoneInfo("America/Detroit")),
+                season=season, week=week, prices=prices, menu_book=menu_book)
+        except (ValueError, RuntimeError, OSError) as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.cfb_slate = prepared.slate
+            st.session_state.cfb_public_slate = prepared.slate
+            st.session_state.cfb_public_excluded = prepared.excluded
+            st.session_state.cfb_view = paper
+            st.session_state.cfb_built_fingerprint = slate_fingerprint(prepared.slate)
+            st.rerun()
+
+
 def render_cfb_page(adapter) -> None:
     history = LocalHistory()
     if "cfb_slate" not in st.session_state:
@@ -139,9 +231,16 @@ def render_cfb_page(adapter) -> None:
     st.title("College football teasers")
     st.caption(f"{CFB_TEASER.league} | {CFB_TEASER.bet_type} | {CFB_TEASER.model_version} | {CFB_TEASER.status} · local model workspace")
     if view is None:
-        st.info("Enter pregame CFB lines and actual sportsbook teaser prices to build a full paper card.")
+        st.info("Choose a reviewed public CFB slate or enter lines manually to build a PAPER card.")
     else:
         _render_board(view, history, adapter, slate)
+
+    source_mode = st.radio("CFB market source", ("Public lines", "Manual entry"),
+                           horizontal=True, key="cfb_source_mode")
+    if source_mode == "Public lines":
+        _render_public_source(history, adapter)
+        _render_history(history, adapter)
+        return
 
     st.subheader("Enter CFB market")
     with st.expander("Slate settings and prices", expanded=not bool(slate["sportsbook"])):
@@ -223,6 +322,10 @@ def render_cfb_page(adapter) -> None:
             st.session_state.pop("cfb_view", None)
             st.rerun()
 
+    _render_history(history, adapter)
+
+
+def _render_history(history, adapter) -> None:
     st.subheader("Paper history")
     perf = paper_performance(history, adapter)
     st.markdown(f"**Cumulative paper:** {perf['settled']} settled · {perf['wins']} W / {perf['losses']} L / {perf['pushes']} P · {signed(perf['net_units'])} hypothetical units")

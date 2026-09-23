@@ -185,6 +185,12 @@ def normalize_review(preview: MarketPreview, edited_rows: list[dict]) -> dict:
                       source_event_id=source_id, source_provider=preview.spec.provider,
                       source_url=preview.spec.source_url, source_type="url",
                       market_role="REFERENCE")
+        if preview.spec.league == "CFB":
+            record["away_school"] = (original.get("away_school")
+                                      if away == original["away_team"] else None)
+            record["home_school"] = (original.get("home_school")
+                                      if home == original["home_team"] else None)
+        record["event_state"] = original.get("event_state")
         for field in ODDS_FIELDS:
             record[field] = _checked_number(edited.get(field), field,
                                             odds=field.endswith("_price") or field.startswith("moneyline_"))

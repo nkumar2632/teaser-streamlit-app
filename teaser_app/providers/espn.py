@@ -73,6 +73,10 @@ def parse_scoreboard(raw: bytes, league: str) -> tuple[list[dict], list[str]]:
         row = {
             "source_event_id": source_id, "league": league,
             "away_team": away, "home_team": home, "kickoff": when.isoformat(),
+            "away_school": _as_text(_nested(competitors["away"], "team", "location")),
+            "home_school": _as_text(_nested(competitors["home"], "team", "location")),
+            "event_state": _as_text(_nested(event, "status", "type", "state") or
+                                    _nested(competition, "status", "type", "state")),
             "sportsbook": sportsbook,
             "spread_away": _as_text(_nested(odds, "pointSpread", "away", "close", "line")),
             "spread_away_price": _as_text(_nested(odds, "pointSpread", "away", "close", "odds")),

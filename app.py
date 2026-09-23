@@ -53,7 +53,7 @@ adapter: TeaserModelAdapter = st.session_state.adapter
 slate: dict = st.session_state.slate
 
 mode = st.radio("League and model track", ("NFL · LIVE", "CFB · PAPER"), horizontal=True)
-render_url_import()
+render_url_import("CFB" if mode == "CFB · PAPER" else "NFL")
 render_screenshot_import()
 render_results(adapter)
 render_market_comparison("CFB" if mode == "CFB · PAPER" else "NFL")

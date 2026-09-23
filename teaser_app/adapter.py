@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
@@ -92,6 +92,28 @@ class TeaserModelAdapter:
 
     def canonical_team(self, value: str) -> str:
         return normalize_team(value)
+
+    def cfb_public_sides(self, *, away: str, home: str, kickoff: str,
+                         home_spread: str, away_spread: str | None,
+                         total: str) -> list[dict]:
+        """Validate one public CFB game and expand its quote through the model boundary."""
+        verify_model()
+        away = _text(away, "CFB away team")
+        home = _text(home, "CFB home team")
+        if away.casefold() == home.casefold():
+            raise ValueError("CFB game needs distinct teams")
+        when = _aware(kickoff, "CFB kickoff").astimezone(timezone.utc)
+        spread = _decimal(home_spread, "CFB home spread")
+        game_total = _decimal(total, "CFB total")
+        if (not on_half_point_grid(spread) or not on_half_point_grid(game_total)
+                or game_total <= 0):
+            raise ValueError("CFB spread and total need half-point-grid values and a positive total")
+        if away_spread is not None and _decimal(away_spread, "CFB away spread") != -spread:
+            raise ValueError("CFB opposing spreads conflict")
+        common = {"away_team": away, "home_team": home,
+                  "total": str(game_total), "kickoff": when.isoformat()}
+        return [{**common, "team": away, "spread": str(-spread)},
+                {**common, "team": home, "spread": str(spread)}]
 
     def placement_terms(self, view: CardView, recheck_slate: dict) -> dict[str, dict]:
         """Freeze the rechecked quote and source-derived teaser line for settlement."""
@@ -235,8 +257,8 @@ class TeaserModelAdapter:
         if label not in {CURRENT_PREGAME, ARCHIVED_PREGAME_REFERENCE, TRUE_TIMESTAMPED_PREGAME}:
             raise ValueError("CFB requires a recognized pregame provenance label")
         rows = slate.get("rows")
-        if not isinstance(rows, list) or not 1 <= len(rows) <= 64:
-            raise ValueError("enter 1 to 64 quoted sides")
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 400:
+            raise ValueError("enter 1 to 400 quoted CFB sides")
         inputs = []
         seen: dict[str, tuple[Decimal, datetime, dict[str, Decimal]]] = {}
         team_games: dict[str, str] = {}
