@@ -16,7 +16,7 @@ from teaser_app.views import CardView, PaperView, RecheckView, frozen_row
 load_model_path()
 
 from teaser_model_v1.engine.constants import UNITS_PER_TICKET  # noqa: E402
-from teaser_model_v1.engine.geometry import passes_total_guardrail, secondary_reason_for  # noqa: E402
+from teaser_model_v1.engine.geometry import passes_total_guardrail, secondary_reason_for, teased_spread  # noqa: E402
 from teaser_model_v1.engine.numeric import is_whole_number, on_half_point_grid  # noqa: E402
 from teaser_model_v1.engine.pricing import profit_from_american_odds  # noqa: E402
 from teaser_model_v1.engine.tickets import select_live_tickets  # noqa: E402
@@ -30,6 +30,9 @@ from teaser_model_v1.live.paper import (  # noqa: E402
     primary_paper_legs, secondary_paper_legs,
 )
 from teaser_model_v1.live.recheck import recheck_card  # noqa: E402
+from teaser_model_v1.live.settlement import (  # noqa: E402
+    PrimaryPushInSettlement, grade_leg_settlement, settle_ticket,
+)
 from teaser_model_v1.live.research import teased_board_rows  # noqa: E402
 from teaser_model_v1.live.schemas import (  # noqa: E402
     NFL_TEAMS, MarketQuote, MarketSnapshot, TeaserPriceQuote, TeaserPriceSnapshot,
@@ -89,6 +92,24 @@ class TeaserModelAdapter:
 
     def canonical_team(self, value: str) -> str:
         return normalize_team(value)
+
+    def placement_terms(self, view: CardView, recheck_slate: dict) -> dict[str, dict]:
+        """Freeze the rechecked quote and source-derived teaser line for settlement."""
+        verify_model()
+        terms = {}
+        for leg in view.qualifying_legs:
+            rows = [row for row in recheck_slate["rows"] if row["team"] == leg["team"]]
+            if len(rows) != 1:
+                raise ValueError("rechecked placement leg must have one quoted side")
+            row = rows[0]
+            spread = _decimal(row["spread"], "rechecked spread")
+            terms[leg["leg_id"]] = {
+                "leg_id": leg["leg_id"], "game_id": leg["game_id"], "team": leg["team"],
+                "away_team": row["away_team"], "home_team": row["home_team"],
+                "kickoff": row["kickoff"], "spread": str(spread),
+                "teased_spread": str(teased_spread(spread)),
+            }
+        return terms
 
     def _snapshots(self, slate: dict) -> tuple[MarketSnapshot, TeaserPriceSnapshot | None]:
         verify_model()
@@ -346,6 +367,94 @@ class TeaserModelAdapter:
                             "selected": ticket["selected"], "profit": ticket["profit"],
                             "stake_units": ticket["stake_units"]})
         return {"legs": outcomes, "tickets": tickets}
+
+    def grade_live_placement(self, run: dict, placement: dict,
+                             scores: dict[str, dict[str, int]], *,
+                             book_settlement: str | None = None,
+                             settled_at: str | None = None,
+                             book_profit_loss_units: float | None = None) -> dict:
+        """Use frozen source settlement functions on stored placement terms only."""
+        verify_model()
+        if run["strategy"] != {"league": "NFL", "bet_type": "TEASER",
+                                "model_version": "teaser_v1.0", "status": "LIVE"}:
+            raise ValueError("NFL LIVE run required")
+        if placement["run_id"] != run["run_id"]:
+            raise ValueError("placement and run differ")
+        review = {"status": "REQUIRES_REVIEW", "model_ticket_result": None,
+                  "legs": [], "reason": "stored placement or leg terms are incomplete"}
+        try:
+            terms = placement["leg_terms"]
+            if not isinstance(terms, list):
+                return review
+            legs = {row["leg_id"]: row for row in terms}
+            stake = Decimal(str(placement["stake_units"]))
+            offered = Decimal(str(placement["offered_american"]))
+            leg_ids = placement["leg_ids"]
+            if (not stake.is_finite() or stake <= 0 or not offered.is_finite()
+                    or offered == 0 or not isinstance(leg_ids, list) or not leg_ids):
+                return review
+        except (KeyError, InvalidOperation, TypeError, ValueError):
+            return review
+        graded = []
+        for leg_id in leg_ids:
+            leg = legs.get(leg_id)
+            if not leg or not all(leg.get(field) for field in ("game_id", "team", "kickoff", "teased_spread")):
+                return review
+            result = scores.get(leg["game_id"])
+            if result is None:
+                return {"status": "PENDING", "model_ticket_result": None, "legs": [],
+                        "reason": "waiting for another final game"}
+            if leg["team"] not in {leg.get("home_team"), leg.get("away_team")}:
+                return review
+            margin = (result["home"] - result["away"]) if leg["team"] == leg["home_team"] else (result["away"] - result["home"])
+            try:
+                graded.append(grade_leg_settlement(
+                    leg_id=leg_id, team=leg["team"], teased_spread=leg["teased_spread"],
+                    final_margin=margin, home_score=result["home"], away_score=result["away"],
+                ))
+            except PrimaryPushInSettlement:
+                return {"status": "REQUIRES_REVIEW", "model_ticket_result": None,
+                        "legs": [], "reason": "primary leg unexpectedly pushed"}
+        model_result = "WIN" if all(leg.model_result == "WIN" for leg in graded) else "LOSS"
+        if book_settlement is None:
+            return {"status": "REQUIRES_REVIEW", "model_ticket_result": model_result,
+                    "legs": [leg.to_dict() for leg in graded],
+                    "reason": "confirm the sportsbook settlement before LIVE P/L"}
+        if settled_at is None:
+            raise ValueError("settlement time required")
+        source_placement = {**placement, "placement_id": placement["placement_id"],
+                            "american_odds": placement["offered_american"]}
+        source = settle_ticket(
+            placement=source_placement, legs=tuple(graded), book_settlement=book_settlement,
+            settled_at=datetime.fromisoformat(settled_at),
+            profit_loss_units=book_profit_loss_units,
+        )
+        return {"status": book_settlement, "model_ticket_result": source.model_ticket_result,
+                "book_settlement": source.book_settlement,
+                "profit_loss_units": repr(source.profit_loss_units),
+                "legs": [leg.to_dict() for leg in graded], "reason": ""}
+
+    def grade_stored_legs(self, run: dict, scores: dict[str, dict[str, int]]) -> list[dict]:
+        """Read-only results display using frozen lines and the pinned leg grader."""
+        verify_model()
+        displayed = []
+        for leg in run["legs"]:
+            score = scores.get(leg["game_id"])
+            result = "PENDING"
+            if score is not None:
+                market = next((row for row in run["slate"]["rows"]
+                               if row["team"] == leg["team"] and row["kickoff"] == leg["kickoff"]), None)
+                if market is None or leg["team"] not in {market.get("home_team"), market.get("away_team")} or not leg.get("teased_spread"):
+                    result = "REQUIRES_REVIEW"
+                else:
+                    margin = (score["home"] - score["away"]) if leg["team"] == market["home_team"] else (score["away"] - score["home"])
+                    result = grade_teased_leg(margin, leg["teased_spread"]).value
+            displayed.append({"run_id": run["run_id"], "game_id": leg["game_id"],
+                              "leg_id": leg["leg_id"], "team": leg["team"],
+                              "spread": leg["spread"], "teased_spread": leg["teased_spread"],
+                              "result": result, "away_score": score["away"] if score else None,
+                              "home_score": score["home"] if score else None})
+        return displayed
 
     def recheck(self, card_id: str, slate: dict) -> RecheckView:
         verify_model()

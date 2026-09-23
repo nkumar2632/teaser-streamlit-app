@@ -55,7 +55,9 @@ def _read(folder: Path, record_id: str) -> dict:
 
 def _save(folder: Path, prefix: str, record: dict) -> dict:
     record_id = _identity(prefix, record)
-    field = {"mkt": "snapshot_id", "run": "run_id", "res": "result_id"}[prefix]
+    field = {"mkt": "snapshot_id", "run": "run_id", "res": "result_id",
+             "rst": "result_snapshot_id", "plc": "placement_id",
+             "stl": "settlement_id"}[prefix]
     saved = json.loads(_canonical({field: record_id, **record}))
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{record_id}.json"
@@ -172,7 +174,8 @@ class LocalHistory:
                       key=lambda r: (r["captured_at"], r["run_id"]), reverse=True)
 
     def save_paper_results(self, run_id: str, scores: dict[str, dict[str, int]],
-                           *, recorded_at: str) -> dict:
+                           *, recorded_at: str, result_snapshot_id: str | None = None,
+                           source_provider: str | None = None) -> dict:
         run = self.get_run(run_id)
         if run["strategy"]["status"] != "PAPER":
             raise ValueError("results here are paper-only")
@@ -185,12 +188,86 @@ class LocalHistory:
         for score in scores.values():
             if set(score) != {"home", "away"} or any(type(v) is not int or v < 0 or v > 200 for v in score.values()):
                 raise ValueError("scores require nonnegative integer home and away values")
-        return _save(self.root / "results", "res", {"schema_version": 1, "kind": "paper_final_scores",
-                                                      "run_id": run_id, "recorded_at": recorded_at,
-                                                      "scores": scores})
+        payload = {"schema_version": 1, "kind": "paper_final_scores",
+                   "run_id": run_id, "recorded_at": recorded_at, "scores": scores}
+        if result_snapshot_id is not None:
+            self.get_result_snapshot(result_snapshot_id)
+            payload.update(result_snapshot_id=result_snapshot_id, source_provider=source_provider)
+        return _save(self.root / "results", "res", payload)
 
     def latest_paper_results(self, run_id: str) -> dict | None:
         folder = self.root / "results"
         records = [json.loads(path.read_text(encoding="utf-8")) for path in folder.glob("res_*.json")]
         matching = [record for record in records if record["run_id"] == run_id]
-        return max(matching, key=lambda r: (r["recorded_at"], r["result_id"])) if matching else None
+        return max(matching, key=lambda r: (datetime.fromisoformat(r["recorded_at"]).timestamp(),
+                                            r["result_id"])) if matching else None
+
+    def save_result_snapshot(self, payload: dict) -> dict:
+        if (payload.get("kind") != "confirmed_game_results" or payload.get("league") not in {"NFL", "CFB"}
+                or payload.get("provider") not in {"ESPN", "MANUAL"}
+                or not isinstance(payload.get("events"), list) or not payload["events"]):
+            raise ValueError("expected confirmed football results")
+        return _save(self.root / "result_snapshots", "rst", payload)
+
+    def result_snapshots(self, *, league: str | None = None) -> list[dict]:
+        records = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.root / "result_snapshots").glob("rst_*.json")]
+        return sorted((record for record in records if league is None or record["league"] == league),
+                      key=lambda record: (record["confirmed_at"], record["result_snapshot_id"]))
+
+    def get_result_snapshot(self, snapshot_id: str) -> dict:
+        return _read(self.root / "result_snapshots", snapshot_id)
+
+    def live_placements(self, *, season: int | None = None) -> list[dict]:
+        records = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.root / "placements").glob("plc_*.json")]
+        return sorted((record for record in records if season is None or record["season"] == season),
+                      key=lambda record: (record["placed_at"], record["placement_id"]))
+
+    def save_operator_placement(self, payload: dict) -> dict:
+        run = self.get_run(payload["run_id"])
+        if (run["strategy"] != {"league": "NFL", "bet_type": "TEASER",
+                                 "model_version": "teaser_v1.0", "status": "LIVE"}
+                or payload.get("kind") != "operator_reported_placement"
+                or payload.get("card_id") != run.get("card_id")
+                or payload.get("ticket_key") not in run["selected_ticket_keys"]):
+            raise ValueError("placement must identify a selected NFL LIVE ticket")
+        ticket = next(item for item in run["tickets"] if item["ticket_key"] == payload["ticket_key"])
+        if (payload.get("leg_ids") != ticket["leg_ids"]
+                or payload.get("leg_terms") != [run["recheck"]["placement_legs"][key]
+                                                 for key in ticket["leg_ids"]]
+                or payload.get("offered_american") != run["recheck"]["offered_prices"].get(str(ticket["n_legs"]))
+                or payload.get("stake_units") != ticket["stake_units"]):
+            raise ValueError("placement terms must match the frozen ticket")
+        prior = [item for item in self.live_placements() if item["card_id"] == payload["card_id"]
+                 and item["ticket_key"] == payload["ticket_key"]]
+        if prior:
+            expected = {key: value for key, value in prior[0].items() if key != "placement_id"}
+            if expected == payload:
+                return prior[0]
+            raise ValueError("ticket already has a placement record; review it before adding another")
+        return _save(self.root / "placements", "plc", payload)
+
+    def live_settlements(self) -> list[dict]:
+        records = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.root / "live_settlements").glob("stl_*.json")]
+        return sorted(records, key=lambda record: (
+            datetime.fromisoformat(record["settled_at"]).timestamp(), record["settlement_id"]))
+
+    def save_live_settlement(self, payload: dict, *, allow_correction: bool = False) -> dict:
+        if payload.get("kind") != "operator_confirmed_settlement":
+            raise ValueError("expected operator-confirmed settlement")
+        if payload.get("placement_id") not in {p["placement_id"] for p in self.live_placements()}:
+            raise ValueError("cannot settle an unrecorded placement")
+        prior = [row for row in self.live_settlements() if row["placement_id"] == payload["placement_id"]]
+        if prior:
+            latest = prior[-1]
+            comparable = {key: value for key, value in latest.items()
+                          if key not in {"settlement_id", "settled_at", "result_snapshot_id", "supersedes"}}
+            candidate = {key: value for key, value in payload.items()
+                         if key not in {"settled_at", "result_snapshot_id", "supersedes"}}
+            if comparable == candidate:
+                return latest
+            if not allow_correction or payload.get("supersedes") != latest["settlement_id"]:
+                raise ValueError("conflicting settled ticket requires explicit correction review")
+        return _save(self.root / "live_settlements", "stl", payload)

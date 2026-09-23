@@ -27,25 +27,35 @@ def run_record(view: PaperView, slate: dict, snapshot_id: str) -> dict:
 
 def paper_performance(history, adapter) -> dict:
     """Score only recorded final outcomes for PAPER runs; never touch a live ledger."""
-    settled = wins = losses = pushes = 0
-    net = Decimal(0)
-    for run in history.runs(status="PAPER"):
+    settled = wins = losses = pushes = review = 0
+    net = staked = Decimal(0)
+    for run in history.runs(league="CFB", status="PAPER", bet_type="TEASER",
+                            model_version="teaser_v1.0"):
         result_record = history.latest_paper_results(run["run_id"])
         if result_record is None:
             continue
         graded = adapter.grade_paper_results(run, result_record["scores"])
+        leg_outcomes = graded["legs"]
+        source_tickets = {row["ticket_key"]: row for row in run["tickets"]}
         for ticket in graded["tickets"]:
             if not ticket["selected"] or ticket["result"] == "PENDING":
                 continue
+            source = source_tickets[ticket["ticket_key"]]
+            if any(leg_outcomes.get(leg_id) == "PUSH" for leg_id in source["leg_ids"]):
+                pushes += 1
+                review += 1
+                continue
             settled += 1
+            staked += Decimal(str(ticket["stake_units"]))
             if ticket["result"] == "WIN":
                 wins += 1
                 net += Decimal(ticket["profit"]) * ticket["stake_units"]
             elif ticket["result"] == "LOSS":
                 losses += 1
                 net -= ticket["stake_units"]
-            else:
-                pushes += 1
     return {"settled": settled, "wins": wins, "losses": losses,
-            "pushes": pushes, "net_units": str(net), "actual_placements": 0,
+            "pushes": pushes, "requires_review": review,
+            "hypothetical_units_staked": str(staked),
+            "roi": str(net / staked) if staked else None,
+            "net_units": str(net), "actual_placements": 0,
             "actual_units_staked": 0}

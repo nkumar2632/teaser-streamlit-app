@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from copy import deepcopy
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,9 +13,11 @@ from teaser_app.adapter import TeaserModelAdapter
 from teaser_app.cfb_page import render_cfb_page
 from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
 from teaser_app.market_data import LocalHistory
+from teaser_app.live_history import record_reported_placements
 from teaser_app.market_compare_page import render_market_comparison
 from teaser_app.presentation import card as html_card, h, percent, signed
 from teaser_app.screenshot_import import render_screenshot_import
+from teaser_app.results_page import render_results
 from teaser_app.strategy import NFL_TEASER
 from teaser_app.url_import import render_url_import
 
@@ -52,6 +55,7 @@ slate: dict = st.session_state.slate
 mode = st.radio("League and model track", ("NFL · LIVE", "CFB · PAPER"), horizontal=True)
 render_url_import()
 render_screenshot_import()
+render_results(adapter)
 render_market_comparison("CFB" if mode == "CFB · PAPER" else "NFL")
 if mode == "CFB · PAPER":
     render_cfb_page(adapter)
@@ -64,6 +68,7 @@ def reset_result() -> None:
     st.session_state.pop("recheck", None)
     st.session_state.pop("recheck_fingerprint", None)
     st.session_state.pop("reported_placed", None)
+    st.session_state.pop("card_slate", None)
 
 
 def show_error(exc: Exception) -> None:
@@ -136,7 +141,7 @@ else:
     else:
         st.caption("Proposal from the entered sportsbook snapshot. Verify current lines and prices before any outside action.")
 
-    placement_label = "PLACED · operator reported, session only" if reported_placed else "🔵 SHADOW — NOT PLACED"
+    placement_label = "PLACED · operator reported, saved locally" if reported_placed else "🔵 SHADOW — NOT PLACED"
     recheck_label = (
         "🔴 DISCARD — REBUILD" if recheck_view and recheck_view.verdict != "VALIDATED" and fresh else
         "🟢 VALIDATED · model recheck" if validated else "🟡 PENDING RECHECK"
@@ -185,26 +190,36 @@ else:
                 st.warning("Source model rebuilt a new proposal after a discard. It is pending its own recheck.")
                 if st.button("Adopt rebuilt proposal", disabled=current_fp != recheck_fp, use_container_width=True):
                     st.session_state.card = recheck_view.rebuilt_card
+                    st.session_state.card_slate = deepcopy(slate)
                     st.session_state.built_fingerprint = current_fp
                     st.session_state.pop("recheck", None)
                     st.session_state.pop("recheck_fingerprint", None)
                     st.session_state.pop("reported_placed", None)
                     st.rerun()
         if validated and not view.historical and not reported_placed:
-            st.caption("If you already placed tickets outside this app, you may annotate this session. No wager is submitted and no durable record is kept.")
+            st.caption("If you already placed tickets outside this app, record them here for later settlement. This is an operator report, not sportsbook verification; no wager is submitted.")
             selected_labels = {" / ".join(t["teams"]): t["ticket_key"] for t in view.selected_tickets}
             with st.form("reported_placement"):
                 named = st.multiselect("Tickets already placed", tuple(selected_labels))
+                placed_at = st.text_input("Actually placed at · ISO with UTC offset",
+                                          value=datetime.now(ZoneInfo("America/Detroit")).isoformat(timespec="seconds"))
                 confirm = st.checkbox("I confirm these tickets were already placed outside this app")
                 report = st.form_submit_button("Record operator-reported PLACED status", use_container_width=True)
             if report:
                 if not confirm or not named:
                     st.error("Select tickets and confirm the outside placement first.")
                 else:
-                    st.session_state.reported_placed = tuple(selected_labels[name] for name in named)
-                    st.rerun()
+                    try:
+                        recorded = record_reported_placements(
+                            LocalHistory(), view, st.session_state["card_slate"], slate,
+                            recheck_view, [selected_labels[name] for name in named], placed_at, adapter)
+                    except (KeyError, ValueError, OSError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state.reported_placed = tuple(item["ticket_key"] for item in recorded)
+                        st.rerun()
         elif reported_placed:
-            st.caption("Reported placed ticket IDs: " + ", ".join(reported_placed) + ". This annotation disappears when the session ends.")
+            st.caption("Operator-reported placed ticket IDs: " + ", ".join(reported_placed) + ". These placement records are saved locally for reviewed settlement.")
 
     with st.expander(f"Full ticket board · {len(view.tickets)} constructed"):
         st.caption("All model-constructed tickets, including negative EV and unavailable-price tickets. Selected tickets are shown above.")
@@ -265,6 +280,7 @@ if st.button("Build proposal from entered slate", type="primary", use_container_
     else:
         reset_result()
         st.session_state.card = view
+        st.session_state.card_slate = deepcopy(slate)
         st.session_state.built_fingerprint = slate_fingerprint(slate)
         st.rerun()
 if st.session_state.get("card") is not None:
@@ -332,6 +348,7 @@ with st.expander("Import, export, or inspect verified example"):
             st.session_state.revision += 1
             reset_result()
             st.session_state.card = view
+            st.session_state.card_slate = deepcopy(parsed)
             st.session_state.built_fingerprint = slate_fingerprint(parsed)
             st.rerun()
     st.download_button("Download entered slate JSON", data=encode_slate(slate), file_name="teaser_slate.json",
@@ -348,6 +365,7 @@ with st.expander("Import, export, or inspect verified example"):
             st.session_state.revision += 1
             reset_result()
             st.session_state.card = view
+            st.session_state.card_slate = deepcopy(example_slate)
             st.session_state.built_fingerprint = slate_fingerprint(example_slate)
             st.rerun()
     if st.button("Start a new blank slate", use_container_width=True):
