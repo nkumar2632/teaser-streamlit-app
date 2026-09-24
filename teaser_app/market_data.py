@@ -57,7 +57,7 @@ def _save(folder: Path, prefix: str, record: dict) -> dict:
     record_id = _identity(prefix, record)
     field = {"mkt": "snapshot_id", "run": "run_id", "res": "result_id",
              "rst": "result_snapshot_id", "plc": "placement_id",
-             "stl": "settlement_id"}[prefix]
+             "stl": "settlement_id", "mnu": "verification_id"}[prefix]
     saved = json.loads(_canonical({field: record_id, **record}))
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{record_id}.json"
@@ -138,6 +138,32 @@ class LocalHistory:
                        for event in payload["events"])):
             raise ValueError("expected a confirmed sportsbook screenshot snapshot")
         return _save(self.root / "normalized", "mkt", payload)
+
+    def save_menu_verification(self, *, snapshot_id: str, sportsbook: str,
+                               prices: dict[str, str], observed_at: str) -> dict:
+        """An explicit unchanged-price assertion; never alters the source snapshot."""
+        source = self.get_snapshot(snapshot_id)
+        from teaser_app.nfl_market import UNKNOWN_BOOK, execution_book
+        if (snapshot_role(source) != "EXECUTION" or source.get("source_type") != "screenshot"
+                or source.get("schema_version") != 3 or not isinstance(sportsbook, str)
+                or not sportsbook.strip() or execution_book(source) == UNKNOWN_BOOK
+                or execution_book(source).casefold() != sportsbook.casefold()
+                or not isinstance(prices, dict) or set(prices) != {"2", "3"}
+                or not any(prices.values())):
+            raise ValueError("menu verification needs a confirmed sportsbook snapshot and prices")
+        if any(value and (not isinstance(value, str) or
+                          not re.fullmatch(r"[+-]?[0-9]{3,5}", value) or abs(int(value)) < 100)
+               for value in prices.values()):
+            raise ValueError("menu verification needs valid American odds")
+        when = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if when.utcoffset() is None:
+            raise ValueError("menu verification time needs a UTC offset")
+        return _save(self.root / "menu_verifications", "mnu", {
+            "schema_version": 1, "kind": "operator_menu_reconfirmation",
+            "source_snapshot_id": snapshot_id, "sportsbook": sportsbook,
+            "prices": dict(prices), "observed_at": when.isoformat(),
+            "source_reference": f"operator verified unchanged; parent market {snapshot_id}",
+        })
 
     def get_snapshot(self, snapshot_id: str) -> dict:
         return _read(self.root / "normalized", snapshot_id)

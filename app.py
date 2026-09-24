@@ -15,6 +15,8 @@ from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
 from teaser_app.market_data import LocalHistory
 from teaser_app.live_history import record_reported_placements
 from teaser_app.market_compare_page import render_market_comparison
+from teaser_app.nfl_market import execution_status
+from teaser_app.nfl_market_page import render_saved_nfl_market
 from teaser_app.presentation import card as html_card, h, percent, signed
 from teaser_app.screenshot_import import render_screenshot_import
 from teaser_app.results_page import render_results
@@ -69,6 +71,8 @@ def reset_result() -> None:
     st.session_state.pop("recheck_fingerprint", None)
     st.session_state.pop("reported_placed", None)
     st.session_state.pop("card_slate", None)
+    st.session_state.pop("nfl_card_context", None)
+    st.session_state.pop("nfl_recheck_context", None)
 
 
 def show_error(exc: Exception) -> None:
@@ -94,13 +98,14 @@ def render_ticket(ticket, *, selected: bool = False, recheck=None) -> None:
                           accent="selected" if selected else ""), unsafe_allow_html=True)
 
 
-def render_leg(leg) -> None:
+def render_leg(leg, *, screening: bool = False) -> None:
     body = (
         f"{h(signed(leg['spread']))} → {h(signed(leg['teased_spread']))}"
         f" · Total {h(leg['total'])}"
         f"<br>P_est <strong>{h(percent(leg['p_est']))}</strong>"
     )
-    st.markdown(html_card(h(leg["team"]), f"#{leg['rank']} · PRIMARY / LIVE", body),
+    st.markdown(html_card(h(leg["team"]),
+                          f"#{leg['rank']} · PRIMARY / {'SCREENING' if screening else 'LIVE'}", body),
                 unsafe_allow_html=True)
 
 
@@ -124,6 +129,8 @@ if view is None:
     st.info("Enter a sportsbook slate, then build a proposal. The model will determine qualifying legs and tickets.")
 
 else:
+    card_context = st.session_state.get("nfl_card_context")
+    screening = bool(card_context and card_context.get("role") == "REFERENCE")
     current_fp = slate_fingerprint(slate)
     built_fp = st.session_state.get("built_fingerprint")
     recheck_view = st.session_state.get("recheck")
@@ -136,12 +143,22 @@ else:
     st.markdown(f"**{h(view.season)} · Week {h(view.week)} · {h(view.sportsbook)}**")
     if view.historical:
         st.warning("HISTORICAL EXAMPLE — captured Week 2 sportsbook snapshot. This is a regression example, not current betting data.")
-    elif not fresh:
-        st.warning("INPUTS CHANGED — this is the previous proposal. Build or recheck before using these values.")
+    elif screening:
+        st.warning(f"REFERENCE SCREENING — NOT PLACEABLE · Public/reference lines + "
+                   f"{card_context['menu_book']} teaser pricing — NOT AN EXECUTABLE "
+                   f"{card_context['menu_book'].upper()} SLATE")
+        st.caption(f"Lines: {card_context['lines_label']} · teaser pricing: {card_context['menu_book']}")
+    elif card_context and card_context.get("confirmed_execution"):
+        st.info(f"Confirmed EXECUTION proposal · {card_context['line_book']} lines and "
+                f"{card_context['menu_book']} teaser pricing · not placed")
     else:
-        st.caption("Proposal from the entered sportsbook snapshot. Verify current lines and prices before any outside action.")
+        st.caption("Proposal from manual or legacy input. A confirmed sportsbook EXECUTION snapshot is required for placement status.")
+    if not fresh and not view.historical:
+        st.warning("INPUTS CHANGED — this is the previous proposal. Build or recheck before using these values.")
 
-    placement_label = "PLACED · operator reported, saved locally" if reported_placed else "🔵 SHADOW — NOT PLACED"
+    placement_label = ("PLACED · operator reported, saved locally" if reported_placed else
+                       "REFERENCE SCREENING — NOT PLACEABLE" if screening else
+                       "🔵 SHADOW — NOT PLACED")
     recheck_label = (
         "🔴 DISCARD — REBUILD" if recheck_view and recheck_view.verdict != "VALIDATED" and fresh else
         "🟢 VALIDATED · model recheck" if validated else "🟡 PENDING RECHECK"
@@ -160,16 +177,22 @@ else:
     st.markdown("**Proposed aggregate leg exposure**")
     render_exposure(view)
 
-    st.subheader("Qualifying PRIMARY / LIVE legs")
+    st.subheader("Qualifying PRIMARY / SCREENING legs" if screening else "Qualifying PRIMARY / LIVE legs")
     if view.qualifying_legs:
         for leg in view.qualifying_legs:
-            render_leg(leg)
+            render_leg(leg, screening=screening)
     else:
         st.info("No PRIMARY / LIVE leg qualifies in this slate.")
 
     with st.expander("Recheck and operator status"):
-        st.caption("Capture a new sportsbook snapshot by editing the slate and capture time below, save it, then recheck. The model compares selected tickets with those new inputs.")
-        can_recheck = bool(view.selected_tickets) and not view.historical and not reported_placed
+        st.caption("For a saved EXECUTION proposal, select a newer confirmed sportsbook snapshot below, then recheck. The model compares selected tickets with those new inputs.")
+        current_context = st.session_state.get("nfl_current_context")
+        can_recheck = (bool(view.selected_tickets) and not view.historical and not reported_placed
+                       and not screening and
+                       (not card_context or bool(current_context and
+                        current_context.get("confirmed_execution") and
+                        current_context.get("snapshot_id") != card_context.get("snapshot_id") and
+                        current_context.get("fingerprint") == current_fp)))
         if st.button("Recheck selected card against current input", disabled=not can_recheck, use_container_width=True):
             try:
                 result = adapter.recheck(view.card_id, slate)
@@ -178,6 +201,7 @@ else:
             else:
                 st.session_state.recheck = result
                 st.session_state.recheck_fingerprint = slate_fingerprint(slate)
+                st.session_state.nfl_recheck_context = current_context
                 st.rerun()
         if recheck_view:
             st.markdown(f"**{h(recheck_view.verdict)}** · rechecked {h(recheck_view.rechecked_at)}")
@@ -192,11 +216,16 @@ else:
                     st.session_state.card = recheck_view.rebuilt_card
                     st.session_state.card_slate = deepcopy(slate)
                     st.session_state.built_fingerprint = current_fp
+                    st.session_state.nfl_card_context = current_context
                     st.session_state.pop("recheck", None)
                     st.session_state.pop("recheck_fingerprint", None)
+                    st.session_state.pop("nfl_recheck_context", None)
                     st.session_state.pop("reported_placed", None)
                     st.rerun()
-        if validated and not view.historical and not reported_placed:
+        executable, execution_reason = execution_status(
+            card_context, st.session_state.get("nfl_recheck_context"), view,
+            recheck_view, slate, now=datetime.now(ZoneInfo("America/Detroit")))
+        if validated and executable and not view.historical and not reported_placed:
             st.caption("If you already placed tickets outside this app, record them here for later settlement. This is an operator report, not sportsbook verification; no wager is submitted.")
             selected_labels = {" / ".join(t["teams"]): t["ticket_key"] for t in view.selected_tickets}
             with st.form("reported_placement"):
@@ -220,6 +249,8 @@ else:
                         st.rerun()
         elif reported_placed:
             st.caption("Operator-reported placed ticket IDs: " + ", ".join(reported_placed) + ". These placement records are saved locally for reviewed settlement.")
+        else:
+            st.caption(f"Not executable: {execution_reason}.")
 
     with st.expander(f"Full ticket board · {len(view.tickets)} constructed"):
         st.caption("All model-constructed tickets, including negative EV and unavailable-price tickets. Selected tickets are shown above.")
@@ -231,7 +262,7 @@ else:
         for row in view.research:
             is_live = row["on_live_board"]
             label = "P_est" if row["geometry_class"] == "PRIMARY" else "Unadjusted research score"
-            badge = "PRIMARY / LIVE" if is_live else f"{row['geometry_class']} / {row['track']} · paper/excluded"
+            badge = ("PRIMARY / SCREENING" if screening else "PRIMARY / LIVE") if is_live else f"{row['geometry_class']} / {row['track']} · paper/excluded"
             body = (
                 f"{h(signed(row['spread']))} → {h(signed(row['teased_spread']))}"
                 f" · Total {h(row['total'])}"
@@ -253,6 +284,9 @@ else:
             st.code(f"{leg['team']} {leg['leg_id']} · P_raw={leg['p_raw']} · bump={leg['bump']} · P_est={leg['p_est']}")
         for ticket in view.tickets:
             st.code(f"{' / '.join(ticket['teams'])} · P_ticket={ticket['p_ticket']} · break_even={ticket['break_even']} · EV/unit={ticket['ev_per_unit']}")
+
+if render_saved_nfl_market(adapter, reset_result):
+    st.stop()
 
 with st.expander("Slate input · season, book, prices", expanded=not bool(slate["sportsbook"])):
     with st.form("settings"):
@@ -282,6 +316,7 @@ if st.button("Build proposal from entered slate", type="primary", use_container_
         st.session_state.card = view
         st.session_state.card_slate = deepcopy(slate)
         st.session_state.built_fingerprint = slate_fingerprint(slate)
+        st.session_state.pop("nfl_current_context", None)
         st.rerun()
 if st.session_state.get("card") is not None:
     st.markdown("[↑ View proposed card](#proposed-card)")

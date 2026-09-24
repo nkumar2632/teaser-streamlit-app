@@ -7,13 +7,14 @@ from decimal import Decimal
 
 from teaser_app.integrity import PIN
 from teaser_app.market_data import _identity
+from teaser_app.nfl_market import _confirmed_execution, execution_book
 from teaser_app.strategy import NFL_TEASER
 
 
 def run_record(view, slate: dict, snapshot_id: str, recheck, recheck_slate: dict, adapter) -> dict:
     if view.historical or recheck.verdict != "VALIDATED" or recheck.original_card_id != view.card_id:
         raise ValueError("only a validated current NFL proposal can be recorded")
-    return {
+    record = {
         "schema_version": 1, "kind": "model_run", "strategy": NFL_TEASER.to_dict(),
         "card_id": view.card_id, "season": view.season, "week": view.week,
         "captured_at": slate["captured_at"], "sportsbook": view.sportsbook,
@@ -29,6 +30,11 @@ def run_record(view, slate: dict, snapshot_id: str, recheck, recheck_slate: dict
                     "placement_legs": adapter.placement_terms(view, recheck_slate),
                     "offered_prices": dict(recheck_slate["prices"])},
     }
+    if slate.get("source_snapshot_id"):
+        record["confirmed_execution_snapshot_id"] = slate["source_snapshot_id"]
+    if recheck_slate.get("source_snapshot_id"):
+        record["recheck"]["confirmed_execution_snapshot_id"] = recheck_slate["source_snapshot_id"]
+    return record
 
 
 def placement_record(run: dict, ticket_key: str, *, placed_at: str) -> dict:
@@ -53,7 +59,7 @@ def placement_record(run: dict, ticket_key: str, *, placed_at: str) -> dict:
     offered = run["recheck"]["offered_prices"].get(str(ticket["n_legs"]))
     if not offered or not ticket["stake_units"]:
         raise ValueError("ticket needs stored price and stake")
-    return {
+    record = {
         "schema_version": 1, "kind": "operator_reported_placement",
         "designation": "OPERATOR_REPORTED", "run_id": run["run_id"],
         "card_id": run["card_id"], "season": run["season"], "week": run["week"],
@@ -65,13 +71,37 @@ def placement_record(run: dict, ticket_key: str, *, placed_at: str) -> dict:
         "price_snapshot_id": run["recheck"]["price_snapshot_id"],
         "recheck_market_snapshot_id": run["recheck"]["market_snapshot_id"],
     }
+    if run.get("confirmed_execution_snapshot_id"):
+        record["confirmed_execution_snapshot_id"] = run["confirmed_execution_snapshot_id"]
+    if run["recheck"].get("confirmed_execution_snapshot_id"):
+        record["recheck_confirmed_execution_snapshot_id"] = run["recheck"]["confirmed_execution_snapshot_id"]
+    return record
 
 
 def record_reported_placements(history, view, original_slate: dict, recheck_slate: dict,
                                recheck, ticket_keys: list[str], placed_at: str, adapter) -> list[dict]:
     if not ticket_keys or len(set(ticket_keys)) != len(ticket_keys):
         raise ValueError("Select distinct placed tickets")
-    market = history.ingest_snapshot(original_slate)
+    source_id = original_slate.get("source_snapshot_id")
+    recheck_id = recheck_slate.get("source_snapshot_id")
+    if source_id or recheck_id:
+        if not source_id or not recheck_id or source_id == recheck_id:
+            raise ValueError("placement needs distinct confirmed execution snapshots")
+        market = history.get_snapshot(source_id)
+        current = history.get_snapshot(recheck_id)
+        original_book = execution_book(market)
+        recheck_book = execution_book(current)
+        if (not _confirmed_execution(market) or not _confirmed_execution(current)
+                or original_book.casefold() != recheck_book.casefold()
+                or original_book.casefold() != original_slate["sportsbook"].casefold()
+                or recheck_book.casefold() != recheck_slate["sportsbook"].casefold()
+                or original_book.casefold() != original_slate.get("price_sportsbook", "").casefold()
+                or recheck_book.casefold() != recheck_slate.get("price_sportsbook", "").casefold()):
+            raise ValueError("placement snapshots must be confirmed sportsbook EXECUTION data")
+        if datetime.fromisoformat(recheck_slate["captured_at"]) <= datetime.fromisoformat(view.graded_at):
+            raise ValueError("placement recheck capture must postdate card grading")
+    else:
+        market = history.ingest_snapshot(original_slate)
     record = run_record(view, original_slate, market["snapshot_id"], recheck, recheck_slate, adapter)
     record["run_id"] = _identity("run", record)
     placements = [placement_record(record, key, placed_at=placed_at) for key in ticket_keys]

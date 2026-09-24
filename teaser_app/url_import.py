@@ -38,7 +38,7 @@ def espn_preset_url(league: str, today: date | None = None) -> str:
 
 def render_url_import(default_league: str = "NFL") -> None:
     with st.expander("Public Lines · fetch and review ESPN"):
-        st.caption("Fetch and confirm ESPN football lines here. A saved CFB REFERENCE slate can then build a PAPER proposal; fetching alone never builds a card.")
+        st.caption("Fetch and confirm ESPN football lines here. Saved CFB slates can build PAPER cards; saved NFL slates can build non-executable screening cards. Fetching alone never builds a card.")
         url = st.text_input("Public scoreboard URL", placeholder="https://www.espn.com/nfl/scoreboard/_/week/3/year/2026/seasontype/2")
         nfl, cfb = st.columns(2)
         with nfl:
@@ -78,7 +78,8 @@ def render_url_import(default_league: str = "NFL") -> None:
         saved = st.session_state.get("url_saved_snapshot")
         if saved:
             next_step = (" Select it in the CFB Public lines section to build a PAPER proposal."
-                         if saved["league"] == "CFB" else "")
+                         if saved["league"] == "CFB" else
+                         " Select it in NFL Saved market snapshot for a REFERENCE screening proposal.")
             st.success(f"Saved immutable REFERENCE snapshot {saved['snapshot_id']} · {saved['league']} · {saved['source_provider']}.{next_step}")
         preview = st.session_state.get("url_preview")
         if preview is None:

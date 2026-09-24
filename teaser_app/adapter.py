@@ -36,7 +36,7 @@ from teaser_model_v1.live.settlement import (  # noqa: E402
 from teaser_model_v1.live.research import teased_board_rows  # noqa: E402
 from teaser_model_v1.live.schemas import (  # noqa: E402
     NFL_TEAMS, MarketQuote, MarketSnapshot, TeaserPriceQuote, TeaserPriceSnapshot,
-    normalize_team,
+    normalize_team, validate_spread, validate_total,
 )
 
 
@@ -53,6 +53,13 @@ def _decimal(value: Any, name: str) -> Decimal:
     if not result.is_finite():
         raise ValueError(f"{name} must be finite")
     return result
+
+
+def _american_price(value: Any, name: str) -> Decimal:
+    price = _decimal(value, name)
+    if price != price.to_integral_value() or abs(price) < 100:
+        raise ValueError(f"{name} requires American odds of at least +100 or at most -100")
+    return price
 
 
 def _aware(value: Any, name: str) -> datetime:
@@ -92,6 +99,25 @@ class TeaserModelAdapter:
 
     def canonical_team(self, value: str) -> str:
         return normalize_team(value)
+
+    def nfl_market_sides(self, *, away: str, home: str, kickoff: str,
+                         home_spread: str, away_spread: str | None,
+                         total: str) -> list[dict]:
+        """Validate one normalized market game with frozen NFL input guards."""
+        verify_model()
+        away, home = normalize_team(away), normalize_team(home)
+        if away == home:
+            raise ValueError("NFL game needs distinct teams")
+        when = _aware(kickoff, "NFL kickoff").astimezone(timezone.utc)
+        spread = validate_spread(_decimal(home_spread, "NFL home spread"))
+        game_total = validate_total(_decimal(total, "NFL total"))
+        if away_spread is not None and validate_spread(
+                _decimal(away_spread, "NFL away spread")) != -spread:
+            raise ValueError("NFL opposing spreads conflict")
+        common = {"away_team": away, "home_team": home,
+                  "total": str(game_total), "kickoff": when.isoformat()}
+        return [{**common, "team": away, "spread": str(-spread)},
+                {**common, "team": home, "spread": str(spread)}]
 
     def cfb_public_sides(self, *, away: str, home: str, kickoff: str,
                          home_spread: str, away_spread: str | None,
@@ -140,7 +166,13 @@ class TeaserModelAdapter:
         season = _int(slate.get("season"), "season", 2000, 2100)
         week = _int(slate.get("week"), "week", 1, 18)
         sportsbook = _text(slate.get("sportsbook"), "sportsbook", 60)
+        ingestion_method = _text(slate.get("ingestion_method", "streamlit_manual"),
+                                 "ingestion method", 60)
+        price_sportsbook = _text(slate.get("price_sportsbook", sportsbook),
+                                 "teaser menu sportsbook", 60)
         captured = _aware(slate.get("captured_at"), "capture time")
+        price_captured = _aware(slate.get("price_captured_at", slate.get("captured_at")),
+                                "teaser menu capture time")
         rows = slate.get("rows")
         if not isinstance(rows, list) or not 1 <= len(rows) <= 64:
             raise ValueError("enter 1 to 64 quoted sides")
@@ -178,12 +210,12 @@ class TeaserModelAdapter:
                 game_id=game_id, season=season, week=week, kickoff=kickoff,
                 home_team=home, away_team=away, team=team, spread=spread,
                 total=total, sportsbook=sportsbook, captured_at=captured,
-                ingestion_method="streamlit_manual",
+                ingestion_method=ingestion_method,
                 raw_source_value=f"{team} {spread} total {total}",
             ))
         market = MarketSnapshot(
             season=season, week=week, captured_at=captured, sportsbook=sportsbook,
-            ingestion_method="streamlit_manual", quotes=tuple(quotes),
+            ingestion_method=ingestion_method, quotes=tuple(quotes),
         )
         prices = slate.get("prices")
         if not isinstance(prices, dict) or set(prices) != {"2", "3"}:
@@ -194,13 +226,14 @@ class TeaserModelAdapter:
             if raw == "":
                 continue
             price_quotes.append(TeaserPriceQuote(
-                ticket_size=size, sportsbook=sportsbook, captured_at=captured,
-                american_odds=_decimal(raw, f"{size}-team price"),
-                source_reference="operator-entered actual menu",
+                ticket_size=size, sportsbook=price_sportsbook, captured_at=price_captured,
+                american_odds=_american_price(raw, f"{size}-team price"),
+                source_reference=slate.get("price_source_reference", "operator-entered actual menu"),
             ))
         price_snapshot = TeaserPriceSnapshot(
-            season=season, week=week, captured_at=captured,
-            sportsbook=sportsbook, quotes=tuple(price_quotes),
+            season=season, week=week, captured_at=price_captured,
+            sportsbook=price_sportsbook, quotes=tuple(price_quotes),
+            label=slate.get("price_label", ""),
         ) if price_quotes else None
         return market, price_snapshot
 
