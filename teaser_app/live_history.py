@@ -108,6 +108,8 @@ def record_reported_placements(history, view, original_slate: dict, recheck_slat
     prior = {(row["card_id"], row["ticket_key"]) for row in history.live_placements()}
     if any((record["card_id"], key) in prior for key in ticket_keys):
         raise ValueError("One selected ticket is already recorded as placed")
+    adapter.validate_live_exposure(history.live_placements(), placements,
+                                   season=view.season, week=view.week)
     saved = history.save_run({key: value for key, value in record.items() if key != "run_id"})
     if saved["run_id"] != record["run_id"]:
         raise ValueError("frozen run identity changed")

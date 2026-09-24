@@ -246,6 +246,18 @@ def test_explicit_menu_verification_is_append_only_and_rejects_bad_american_odds
     assert adapter._snapshots(verified.slate)[1].snapshot_id != adapter._snapshots(original.slate)[1].snapshot_id
 
 
+def test_operator_reports_use_frozen_cumulative_weekly_exposure_cap():
+    adapter = TeaserModelAdapter()
+    existing = [{"season": 2026, "week": 3, "stake_units": 1,
+                 "leg_ids": ["2026_03_JAX_DEN:JAX", "2026_03_ATL_CAR:ATL"]}]
+    proposed = [{"season": 2026, "week": 3, "stake_units": 1,
+                 "leg_ids": ["2026_03_JAX_DEN:JAX", "2026_03_TB_CLE:TB"]}]
+    adapter.validate_live_exposure(existing, proposed, season=2026, week=3)
+    with pytest.raises(ValueError, match="exposure cap"):
+        adapter.validate_live_exposure(existing, proposed + proposed, season=2026, week=3)
+    adapter.validate_live_exposure(existing, proposed + proposed, season=2026, week=4)
+
+
 def test_streamlit_saved_nfl_reference_and_execution_builds_require_no_manual_sides(tmp_path, monkeypatch):
     import teaser_app.nfl_market_page as page
 

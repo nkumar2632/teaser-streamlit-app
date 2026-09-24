@@ -15,13 +15,15 @@ from teaser_app.views import CardView, PaperView, RecheckView, frozen_row
 
 load_model_path()
 
-from teaser_model_v1.engine.constants import UNITS_PER_TICKET  # noqa: E402
+from teaser_model_v1.engine.constants import MAX_UNITS_PER_LEG_PER_WEEK, UNITS_PER_TICKET  # noqa: E402
 from teaser_model_v1.engine.geometry import passes_total_guardrail, secondary_reason_for, teased_spread  # noqa: E402
 from teaser_model_v1.engine.numeric import is_whole_number, on_half_point_grid  # noqa: E402
 from teaser_model_v1.engine.pricing import profit_from_american_odds  # noqa: E402
 from teaser_model_v1.engine.tickets import select_live_tickets  # noqa: E402
 from teaser_model_v1.analysis.grading import grade_teased_leg  # noqa: E402
-from teaser_model_v1.live.card import grade_week, ticket_key_for  # noqa: E402
+from teaser_model_v1.live.card import (  # noqa: E402
+    exposure_after, exposure_violations, grade_week, ticket_key_for,
+)
 from teaser_model_v1.live.market import read_market_csv  # noqa: E402
 from teaser_model_v1.live.pricing import read_price_csv  # noqa: E402
 from teaser_model_v1.live.paper import (  # noqa: E402
@@ -158,6 +160,21 @@ class TeaserModelAdapter:
                 "teased_spread": str(teased_spread(spread)),
             }
         return terms
+
+    def validate_live_exposure(self, existing: list[dict], proposed: list[dict],
+                               *, season: int, week: int) -> None:
+        """Apply the frozen weekly leg cap to durable operator-reported placements."""
+        verify_model()
+        exposure = {}
+        for row in (*existing, *proposed):
+            if row.get("season") != season or row.get("week") != week:
+                continue
+            units = _int(row.get("stake_units"), "stake units", 1, MAX_UNITS_PER_LEG_PER_WEEK)
+            exposure = exposure_after(exposure, row["leg_ids"], units)
+            violations = exposure_violations(exposure, MAX_UNITS_PER_LEG_PER_WEEK)
+            if violations:
+                raise ValueError("reported placement exceeds the frozen weekly leg exposure cap: "
+                                 + ", ".join(sorted(violations)))
 
     def _snapshots(self, slate: dict) -> tuple[MarketSnapshot, TeaserPriceSnapshot | None]:
         verify_model()
