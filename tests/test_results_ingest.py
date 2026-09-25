@@ -5,13 +5,12 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from teaser_app.adapter import TeaserModelAdapter
-from teaser_app.live_history import live_performance, placement_record, record_reported_placements
+from teaser_app.live_history import live_performance, placement_record
 from teaser_app.market_data import LocalHistory
 from teaser_app.paper_history import paper_performance
 from teaser_app.providers.espn_results import ESPNResultError, parse_results
@@ -414,29 +413,15 @@ def test_prior_manual_paper_score_conflict_is_flagged_before_confirmation(tmp_pa
 
 
 def test_operator_reported_live_terms_are_frozen_and_not_duplicated(tmp_path):
-    adapter = TeaserModelAdapter()
-    old_slate, _ = adapter.week2_example()
-    slate = {**old_slate, "schema_version": 2, "league": "NFL",
-             "source": "manual_sportsbook", "line_label": "true_timestamped_pregame"}
-    view = adapter.grade(slate)
-    capture = datetime.fromisoformat(slate["captured_at"])
-    later = {**slate, "captured_at": (capture + timedelta(minutes=5)).isoformat(),
-             "prices": {**slate["prices"], "2": "+165"}}
-    recheck = SimpleNamespace(verdict="VALIDATED", original_card_id=view.card_id,
-                              rechecked_at=(capture + timedelta(minutes=6)).isoformat(),
-                              new_market_snapshot_id="later_market",
-                              new_price_snapshot_id="later_price")
-    placed_at = (capture + timedelta(minutes=7)).isoformat()
     history = LocalHistory(tmp_path)
-    key = next(ticket["ticket_key"] for ticket in view.selected_tickets if ticket["n_legs"] == 2)
-    saved = record_reported_placements(history, view, slate, later, recheck, [key], placed_at, adapter)
-    assert len(saved) == 1 and saved[0]["offered_american"] == "+165"
-    run = history.get_run(saved[0]["run_id"])
-    assert run["slate"]["captured_at"] == slate["captured_at"]
-    assert run["recheck"]["captured_at"] == later["captured_at"]
+    run = live_run(history)
+    placed_at = "2026-09-20T10:57:00-04:00"
+    candidate = placement_record(run, run["selected_ticket_keys"][0], placed_at=placed_at)
+    saved = history.save_operator_placement(candidate)
+    assert saved["offered_american"] == "+170"
+    assert history.get_run(saved["run_id"])["recheck"]["captured_at"] == "2026-09-20T10:50:00-04:00"
     assert live_performance(history)["placed"] == 1
-    with pytest.raises(ValueError, match="already recorded"):
-        record_reported_placements(history, view, slate, later, recheck, [key], placed_at, adapter)
+    assert history.save_operator_placement(candidate)["placement_id"] == saved["placement_id"]
 
 
 def test_streamlit_discard_and_confirm_review_gate(tmp_path, monkeypatch):

@@ -145,6 +145,29 @@ def test_duplicate_invalid_started_and_conflicting_games_are_isolated(tmp_path):
                prepare_nfl_snapshot(naive, adapter, now=NOW).excluded)
 
 
+def test_nfl_input_order_invalid_extra_and_missing_prices_leave_leg_model_fields_unchanged(tmp_path):
+    adapter, history = TeaserModelAdapter(), LocalHistory(tmp_path)
+    source = snapshot(history, "REFERENCE")
+    priced = adapter.grade(prepare_nfl_snapshot(source, adapter, now=NOW,
+                            prices={"2": "+170", "3": "-110"}).slate)
+    reordered = deepcopy(source)
+    reordered["events"].reverse()
+    reordered["source_provider"] = "Another reference provider"
+    reordered["events"].append({"away_team": "Arizona Cardinals", "home_team": "Seattle Seahawks",
+                                 "kickoff": KICKOFF, "spread_home": "-3.5", "total": "not-a-total"})
+    prepared = prepare_nfl_snapshot(reordered, adapter, now=NOW)
+    assert len(prepared.included) == len(source["events"])
+    assert len(prepared.excluded) == 1 and prepared.excluded[0]["reason"] == "INVALID_VALUE"
+    unpriced = adapter.grade(prepared.slate)
+    priced_legs = [(leg["game_id"], leg["leg_id"], leg["rank"], leg["p_est"])
+                   for leg in priced.qualifying_legs]
+    assert priced_legs == [(leg["game_id"], leg["leg_id"], leg["rank"], leg["p_est"])
+                           for leg in unpriced.qualifying_legs]
+    assert sorted((ticket["ticket_key"], ticket["p_ticket"]) for ticket in priced.tickets) == sorted(
+        (ticket["ticket_key"], ticket["p_ticket"]) for ticket in unpriced.tickets)
+    assert any(ticket["ev_per_unit"] == "UNAVAILABLE" for ticket in unpriced.tickets)
+
+
 def test_legacy_screenshot_book_is_read_without_rewriting_record(tmp_path):
     adapter, history = TeaserModelAdapter(), LocalHistory(tmp_path)
     source = snapshot(history, "EXECUTION", prices={"2": "+170"})
@@ -208,7 +231,79 @@ def test_execution_gate_requires_confirmed_book_match_fresh_recheck_and_explicit
     premature["captured_at"] = view.graded_at
     assert "postdate" in execution_status(original.context, premature, view, verdict,
                                           recheck.slate, now=review_time)[1]
+    old_board_new_menu = deepcopy(verified.context)
+    old_board_new_menu["menu_observed_at"] = {
+        "2": (graded_at + timedelta(hours=1)).isoformat(),
+        "3": (graded_at + timedelta(hours=1)).isoformat(),
+    }
+    late_check = SimpleNamespace(verdict="VALIDATED", original_card_id=view.card_id,
+                                 rechecked_at=(graded_at + timedelta(hours=1, seconds=5)).isoformat())
+    allowed, reason = execution_status(original.context, old_board_new_menu, view, late_check,
+                                       verified.slate, now=graded_at + timedelta(hours=1, seconds=10))
+    assert not allowed and "market" in reason.lower()
     assert history.live_placements() == []
+
+
+def test_execution_status_fails_closed_across_invalid_state_combinations(tmp_path):
+    adapter, history = TeaserModelAdapter(), LocalHistory(tmp_path)
+    source = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"})
+    original = prepare_nfl_snapshot(source, adapter, now=NOW)
+    view = adapter.grade(original.slate)
+    graded = datetime.fromisoformat(view.graded_at)
+    capture = graded + timedelta(seconds=1)
+    current = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"},
+                       captured=capture.isoformat())
+    verification = {"snapshot_id": current["snapshot_id"], "book": "bluecoins.ag",
+                    "prices": {"2": "+170", "3": "+170"},
+                    "observed_at": (graded + timedelta(seconds=2)).isoformat()}
+    prepared = prepare_nfl_snapshot(current, adapter, now=graded + timedelta(seconds=10),
+                                    menu_verification=verification)
+    verdict = SimpleNamespace(verdict="VALIDATED", original_card_id=view.card_id,
+                              rechecked_at=(graded + timedelta(seconds=5)).isoformat())
+    assert execution_status(original.context, prepared.context, view, verdict, prepared.slate,
+                            now=graded + timedelta(seconds=10))[0]
+
+    reference = deepcopy(original.context)
+    reference.update(role="REFERENCE", confirmed_execution=False)
+    unknown = deepcopy(original.context)
+    unknown["line_book"] = "UNKNOWN"
+    mixed = deepcopy(original.context)
+    mixed["menu_book"] = "other book"
+    same = deepcopy(prepared.context)
+    same["snapshot_id"] = original.context["snapshot_id"]
+    older = deepcopy(prepared.context)
+    older["captured_at"] = (datetime.fromisoformat(original.context["captured_at"])
+                             - timedelta(seconds=1)).isoformat()
+    wrong_recheck_book = deepcopy(prepared.context)
+    wrong_recheck_book.update(line_book="other book", menu_book="other book")
+    stale_menu = deepcopy(prepared.context)
+    stale_menu["menu_observed_at"] = {"2": (graded - timedelta(hours=1)).isoformat(),
+                                       "3": (graded - timedelta(hours=1)).isoformat()}
+    cases = [
+        (None, prepared.context, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (reference, prepared.context, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (unknown, prepared.context, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (mixed, prepared.context, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (original.context, same, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (original.context, older, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (original.context, wrong_recheck_book, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (original.context, stale_menu, verdict, prepared.slate, graded + timedelta(seconds=10)),
+        (original.context, prepared.context, None, prepared.slate, graded + timedelta(seconds=10)),
+        (original.context, prepared.context, verdict, prepared.slate, graded + timedelta(minutes=31)),
+    ]
+    assert all(not execution_status(card, recheck, view, check, slate, now=instant)[0]
+               for card, recheck, check, slate, instant in cases)
+
+    after_kickoff = deepcopy(prepared.context)
+    after_kickoff["captured_at"] = "2026-09-27T16:50:00+00:00"
+    after_kickoff["menu_observed_at"] = {"2": "2026-09-27T16:55:00+00:00",
+                                          "3": "2026-09-27T16:55:00+00:00"}
+    late_verdict = SimpleNamespace(verdict="VALIDATED", original_card_id=view.card_id,
+                                   rechecked_at="2026-09-27T16:55:00+00:00")
+    allowed, reason = execution_status(original.context, after_kickoff, view, late_verdict,
+                                       prepared.slate, now=datetime(2026, 9, 27, 17, 1,
+                                                                    tzinfo=timezone.utc))
+    assert not allowed and "started" in reason.lower()
 
 
 def test_explicit_menu_verification_is_append_only_and_rejects_bad_american_odds(tmp_path):
@@ -253,9 +348,89 @@ def test_operator_reports_use_frozen_cumulative_weekly_exposure_cap():
     proposed = [{"season": 2026, "week": 3, "stake_units": 1,
                  "leg_ids": ["2026_03_JAX_DEN:JAX", "2026_03_TB_CLE:TB"]}]
     adapter.validate_live_exposure(existing, proposed, season=2026, week=3)
+    adapter.validate_live_exposure([], proposed + proposed, season=2026, week=3)
     with pytest.raises(ValueError, match="exposure cap"):
         adapter.validate_live_exposure(existing, proposed + proposed, season=2026, week=3)
     adapter.validate_live_exposure(existing, proposed + proposed, season=2026, week=4)
+    adapter.validate_live_exposure(existing, proposed + proposed, season=2027, week=3)
+    other_identity = [{"season": 2026, "week": 3, "stake_units": 1,
+                       "leg_ids": ["2026_03_OTHER_MATCH:JAX"]}]
+    adapter.validate_live_exposure(existing, other_identity + other_identity,
+                                   season=2026, week=3)
+
+
+def test_weekly_exposure_survives_restart_settlement_and_duplicate_reports(tmp_path):
+    history = LocalHistory(tmp_path)
+    first = _save(history.root / "placements", "plc", {
+        "kind": "operator_reported_placement", "card_id": "card_one",
+        "ticket_key": "ticket_one", "season": 2026, "week": 3,
+        "stake_units": 1, "leg_ids": ["2026_03_JAX_DEN:JAX"],
+        "placed_at": "2026-09-27T12:00:00+00:00"})
+    assert len(LocalHistory(tmp_path).live_placements()) == 1
+    history.save_live_settlement({"kind": "operator_confirmed_settlement",
+                                  "placement_id": first["placement_id"],
+                                  "settled_at": "2026-09-28T12:00:00+00:00",
+                                  "book_settlement": "WIN", "profit_loss_units": "0.5"})
+    _save(history.root / "placements", "plc", {
+        "kind": "operator_reported_placement", "card_id": "card_two",
+        "ticket_key": "ticket_two", "season": 2026, "week": 3,
+        "stake_units": 1, "leg_ids": ["2026_03_JAX_DEN:JAX"],
+        "placed_at": "2026-09-27T12:05:00+00:00"})
+    restarted = LocalHistory(tmp_path)
+    prior = restarted.live_placements()
+    assert len(prior) == 2
+    candidate = [{"season": 2026, "week": 3, "stake_units": 1,
+                  "leg_ids": ["2026_03_JAX_DEN:JAX"]}]
+    with pytest.raises(ValueError, match="exposure cap"):
+        TeaserModelAdapter().validate_live_exposure(prior, candidate, season=2026, week=3)
+    assert len(LocalHistory(tmp_path).live_placements()) == 2
+
+
+@pytest.mark.parametrize("settlement", ["WIN", "LOSS", "PUSH", "VOID"])
+def test_settlement_status_never_restores_consumed_weekly_exposure(tmp_path, settlement):
+    history = LocalHistory(tmp_path)
+    saved = []
+    for index in (1, 2):
+        saved.append(_save(history.root / "placements", "plc", {
+            "kind": "operator_reported_placement", "card_id": f"card_{index}",
+            "ticket_key": f"ticket_{index}", "season": 2026, "week": 3,
+            "stake_units": 1, "leg_ids": ["2026_03_JAX_DEN:JAX"],
+            "placed_at": f"2026-09-27T12:0{index}:00+00:00"}))
+    history.save_live_settlement({"kind": "operator_confirmed_settlement",
+                                  "placement_id": saved[0]["placement_id"],
+                                  "settled_at": "2026-09-28T12:00:00+00:00",
+                                  "book_settlement": settlement,
+                                  "profit_loss_units": "0"})
+    prior = LocalHistory(tmp_path).live_placements()
+    with pytest.raises(ValueError, match="exposure cap"):
+        TeaserModelAdapter().validate_live_exposure(
+            prior, [{"season": 2026, "week": 3, "stake_units": 1,
+                     "leg_ids": ["2026_03_JAX_DEN:JAX"]}], season=2026, week=3)
+
+
+def test_cfb_paper_run_never_consumes_nfl_exposure(tmp_path):
+    history = LocalHistory(tmp_path)
+    history.save_run({"kind": "model_run", "strategy": {
+        "league": "CFB", "bet_type": "TEASER", "model_version": "teaser_v1.0", "status": "PAPER"},
+        "season": 2026, "week": 3, "captured_at": "2026-09-27T10:00:00+00:00",
+        "hypothetical_exposure": {"2026_03_JAX_DEN:JAX": 2}})
+    assert history.live_placements() == []
+    TeaserModelAdapter().validate_live_exposure(
+        history.live_placements(), [{"season": 2026, "week": 3, "stake_units": 1,
+                                     "leg_ids": ["2026_03_JAX_DEN:JAX"]}],
+        season=2026, week=3)
+
+
+def test_manual_or_reference_handler_calls_cannot_create_placements(tmp_path):
+    history, adapter = LocalHistory(tmp_path), TeaserModelAdapter()
+    slate, view = adapter.week2_example()
+    recheck = SimpleNamespace(verdict="VALIDATED", original_card_id=view.card_id,
+                              rechecked_at=slate["captured_at"],
+                              new_market_snapshot_id="new", new_price_snapshot_id="price")
+    with pytest.raises(ValueError, match="confirmed execution"):
+        record_reported_placements(history, view, slate, slate, recheck,
+                                   [view.selected_ticket_keys[0]], slate["captured_at"], adapter)
+    assert history.live_placements() == [] and history.runs() == []
 
 
 def test_streamlit_saved_nfl_reference_and_execution_builds_require_no_manual_sides(tmp_path, monkeypatch):
@@ -273,6 +448,11 @@ def test_streamlit_saved_nfl_reference_and_execution_builds_require_no_manual_si
     assert not any(item.label == "Add side" for item in app.button)
     next(item for item in app.button if item.label == "Build proposal from saved NFL slate").click().run()
     assert not app.exception
+    first_card_id = app.session_state["card"].card_id
+    app.run()
+    assert app.session_state["card"].card_id == first_card_id
+    next(item for item in app.button if item.label == "Build proposal from saved NFL slate").click().run()
+    assert app.session_state["card"].card_id == first_card_id
     assert any("REFERENCE SCREENING — NOT PLACEABLE" in item.value for item in app.warning)
     assert all(item.label != "Record operator-reported PLACED status" for item in app.button)
     assert history.live_placements() == []

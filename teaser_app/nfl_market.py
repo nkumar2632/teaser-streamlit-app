@@ -15,6 +15,7 @@ from teaser_app.public_cfb import DEFAULT_TEASER_BOOK
 UNKNOWN_BOOK = "UNKNOWN"
 LEGACY_BOOK = "USER_SPORTSBOOK_SCREENSHOT"
 MENU_FRESHNESS = timedelta(minutes=30)
+EXECUTION_BOARD_FRESHNESS = timedelta(minutes=30)
 
 
 @dataclass(frozen=True)
@@ -252,6 +253,8 @@ def execution_status(card_context: dict | None, recheck_context: dict | None,
     checked_at = _aware(recheck.rechecked_at, "recheck time")
     if not recheck_captured <= checked_at <= instant:
         return False, "Recheck capture and validation must precede placement review"
+    if instant > recheck_captured + EXECUTION_BOARD_FRESHNESS:
+        return False, "Confirmed sportsbook market capture is no longer fresh"
     if not checked_at <= instant <= checked_at + MENU_FRESHNESS:
         return False, "Model recheck is no longer fresh"
     selected_legs = {leg_id for ticket in view.selected_tickets for leg_id in ticket["leg_ids"]}

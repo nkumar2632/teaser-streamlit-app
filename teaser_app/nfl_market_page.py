@@ -112,11 +112,17 @@ def render_saved_nfl_market(adapter, reset_result) -> bool:
     if selected:
         st.caption("Selected slate is ready. Building is a separate explicit action; no ticket is placed.")
         if st.button("Build proposal from saved NFL slate", type="primary", use_container_width=True):
-            try:
-                view = adapter.grade(prepared.slate)
-            except (ValueError, RuntimeError) as exc:
-                st.error(str(exc))
+            if (st.session_state.get("origin") == "saved_market"
+                    and st.session_state.get("card") is not None
+                    and st.session_state.get("nfl_card_context", {}).get("snapshot_id") == chosen
+                    and st.session_state.get("built_fingerprint") == slate_fingerprint(prepared.slate)):
+                st.info("This exact saved slate already has a proposal in this session.")
             else:
+                try:
+                    view = adapter.grade(prepared.slate)
+                except (ValueError, RuntimeError) as exc:
+                    st.error(str(exc))
+                    return True
                 reset_result()
                 st.session_state.slate = prepared.slate
                 st.session_state.card = view

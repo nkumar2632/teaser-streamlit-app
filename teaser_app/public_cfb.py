@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from unicodedata import normalize
 
-from teaser_app.market_data import snapshot_role
+from teaser_app.market_data import _canonical, snapshot_role
 
 DEFAULT_TEASER_BOOK = "bluecoins.ag"
 
@@ -50,6 +50,8 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
         raise ValueError("Choose a confirmed public CFB market snapshot")
     current = _aware(now.isoformat(), "current time")
     captured = _aware(snapshot.get("captured_at"), "snapshot capture time")
+    if captured > current:
+        raise ValueError("Snapshot capture time cannot be in the future")
     season = snapshot.get("season") if season is None else season
     week = snapshot.get("week") if week is None else week
     if type(season) is not int or not 2000 <= season <= 2100:
@@ -68,6 +70,9 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
     candidates, excluded = {}, []
     conflicts = set()
     for event in snapshot.get("events", []):
+        if not isinstance(event, dict):
+            excluded.append({"game": "unknown", "reason": "INVALID_VALUE", "detail": "game is not an object"})
+            continue
         away = _name(event.get("away_school") or event.get("away_team"))
         home = _name(event.get("home_school") or event.get("home_team"))
         label = f"{away or '?'} at {home or '?'}"
@@ -147,5 +152,14 @@ def build_cfb_public_board(history, adapter, snapshot: dict, *, now: datetime,
                   lines_source=prepared.lines_label,
                   lines_book=prepared.slate["sportsbook"], menu_book=prepared.menu_book,
                   excluded_games=list(prepared.excluded))
-    saved = history.save_run(record)
+    saved = next((prior for prior in reversed(history.runs(league="CFB", status="PAPER"))
+                  if prior.get("board_kind") == "cfb_paper_board"
+                  and prior.get("source_snapshot_id") == snapshot["snapshot_id"]
+                  and prior.get("model_sha") == record["model_sha"]
+                  and prior.get("slate") == record["slate"]
+                  and prior.get("menu_book") == record["menu_book"]
+                  and _canonical(prior.get("legs")) == _canonical(record["legs"])
+                  and _canonical(prior.get("tickets")) == _canonical(record["tickets"])), None)
+    if saved is None:
+        saved = history.save_run(record)
     return replace(paper, run_id=saved["run_id"], snapshot_id=snapshot["snapshot_id"]), prepared, saved

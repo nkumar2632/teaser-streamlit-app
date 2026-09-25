@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import re
 from types import MappingProxyType
 from typing import Any
 
@@ -58,10 +59,10 @@ def _decimal(value: Any, name: str) -> Decimal:
 
 
 def _american_price(value: Any, name: str) -> Decimal:
-    price = _decimal(value, name)
-    if price != price.to_integral_value() or abs(price) < 100:
+    raw = str(value).strip() if not isinstance(value, bool) else ""
+    if not re.fullmatch(r"[+-]?[0-9]{3,5}", raw) or abs(int(raw)) < 100:
         raise ValueError(f"{name} requires American odds of at least +100 or at most -100")
-    return price
+    return Decimal(raw)
 
 
 def _aware(value: Any, name: str) -> datetime:
@@ -353,7 +354,7 @@ class TeaserModelAdapter:
         for size in (2, 3):
             raw = prices[str(size)]
             if raw != "":
-                value = _decimal(raw, f"{size}-team price")
+                value = _american_price(raw, f"{size}-team price")
                 offered[size] = str(value)
                 profit[size] = profit_from_american_odds(float(value))
         legs = build_cfb_paper_legs(inputs)

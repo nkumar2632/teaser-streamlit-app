@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from teaser_app.integrity import PIN
 from teaser_app.market_data import _identity
-from teaser_app.nfl_market import _confirmed_execution, execution_book
+from teaser_app.nfl_market import EXECUTION_BOARD_FRESHNESS, _confirmed_execution, execution_book
 from teaser_app.strategy import NFL_TEASER
 
 
@@ -84,27 +84,27 @@ def record_reported_placements(history, view, original_slate: dict, recheck_slat
         raise ValueError("Select distinct placed tickets")
     source_id = original_slate.get("source_snapshot_id")
     recheck_id = recheck_slate.get("source_snapshot_id")
-    if source_id or recheck_id:
-        if not source_id or not recheck_id or source_id == recheck_id:
-            raise ValueError("placement needs distinct confirmed execution snapshots")
-        market = history.get_snapshot(source_id)
-        current = history.get_snapshot(recheck_id)
-        original_book = execution_book(market)
-        recheck_book = execution_book(current)
-        if (not _confirmed_execution(market) or not _confirmed_execution(current)
-                or original_book.casefold() != recheck_book.casefold()
-                or original_book.casefold() != original_slate["sportsbook"].casefold()
-                or recheck_book.casefold() != recheck_slate["sportsbook"].casefold()
-                or original_book.casefold() != original_slate.get("price_sportsbook", "").casefold()
-                or recheck_book.casefold() != recheck_slate.get("price_sportsbook", "").casefold()):
-            raise ValueError("placement snapshots must be confirmed sportsbook EXECUTION data")
-        if datetime.fromisoformat(recheck_slate["captured_at"]) <= datetime.fromisoformat(view.graded_at):
-            raise ValueError("placement recheck capture must postdate card grading")
-    else:
-        market = history.ingest_snapshot(original_slate)
+    if not source_id or not recheck_id or source_id == recheck_id:
+        raise ValueError("placement needs distinct confirmed execution snapshots")
+    market = history.get_snapshot(source_id)
+    current = history.get_snapshot(recheck_id)
+    original_book = execution_book(market)
+    recheck_book = execution_book(current)
+    if (not _confirmed_execution(market) or not _confirmed_execution(current)
+            or original_book.casefold() != recheck_book.casefold()
+            or original_book.casefold() != original_slate["sportsbook"].casefold()
+            or recheck_book.casefold() != recheck_slate["sportsbook"].casefold()
+            or original_book.casefold() != original_slate.get("price_sportsbook", "").casefold()
+            or recheck_book.casefold() != recheck_slate.get("price_sportsbook", "").casefold()):
+        raise ValueError("placement snapshots must be confirmed sportsbook EXECUTION data")
+    if datetime.fromisoformat(recheck_slate["captured_at"]) <= datetime.fromisoformat(view.graded_at):
+        raise ValueError("placement recheck capture must postdate card grading")
     record = run_record(view, original_slate, market["snapshot_id"], recheck, recheck_slate, adapter)
     record["run_id"] = _identity("run", record)
     placements = [placement_record(record, key, placed_at=placed_at) for key in ticket_keys]
+    if (datetime.fromisoformat(placements[0]["placed_at"]) >
+            datetime.fromisoformat(recheck_slate["captured_at"]) + EXECUTION_BOARD_FRESHNESS):
+        raise ValueError("confirmed sportsbook market capture is no longer fresh")
     prior = {(row["card_id"], row["ticket_key"]) for row in history.live_placements()}
     if any((record["card_id"], key) in prior for key in ticket_keys):
         raise ValueError("One selected ticket is already recorded as placed")
