@@ -22,7 +22,7 @@ APP = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def snapshot(history: LocalHistory, role: str, *, book: str = "bluecoins.ag",
-             prices: dict | None = None, captured: str = CAPTURED) -> dict:
+             prices: dict | None = None, captured: str = CAPTURED, kickoff: str = KICKOFF) -> dict:
     games = (
         ("Jacksonville Jaguars", "Denver Broncos", "+2.5", "-2.5", "44.5"),
         ("Atlanta Falcons", "Carolina Panthers", "+2.5", "-2.5", "43.5"),
@@ -32,7 +32,7 @@ def snapshot(history: LocalHistory, role: str, *, book: str = "bluecoins.ag",
     events = []
     for index, (away, home, away_spread, home_spread, total) in enumerate(games, 1):
         events.append({"source_event_id": f"provider-{index}", "away_team": away,
-                       "home_team": home, "kickoff": KICKOFF,
+                       "home_team": home, "kickoff": kickoff,
                        "spread_away": away_spread, "spread_home": home_spread,
                        "total": total, "event_state": "pre", "sportsbook": book,
                        "market_role": role, "source_type": "url" if role == "REFERENCE" else "screenshot"})
@@ -437,8 +437,10 @@ def test_streamlit_saved_nfl_reference_and_execution_builds_require_no_manual_si
     import teaser_app.nfl_market_page as page
 
     history = LocalHistory(tmp_path)
-    reference = snapshot(history, "REFERENCE", book="DraftKings")
-    execution = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"})
+    # The app screens games against the real clock, so keep kickoff in the future on any date.
+    kickoff = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=3)).isoformat()
+    reference = snapshot(history, "REFERENCE", book="DraftKings", kickoff=kickoff)
+    execution = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"}, kickoff=kickoff)
     monkeypatch.setattr(page, "LocalHistory", lambda: history)
     app = AppTest.from_file(APP, default_timeout=30).run()
     next(item for item in app.radio if item.label == "NFL input path").set_value("Saved market snapshot").run()
@@ -467,11 +469,27 @@ def test_streamlit_saved_nfl_reference_and_execution_builds_require_no_manual_si
 
 
 def test_streamlit_execution_placement_form_waits_for_new_confirmed_recheck(tmp_path, monkeypatch):
+    import teaser_app.adapter as adapter_module
     import teaser_app.nfl_market_page as page
     import teaser_app.market_data as market_data
 
+    # The app reads the real clock for placement review, and the frozen model stamps grading and
+    # recheck times at whole-second precision. Pin those model stamps to explicit whole-second
+    # times so the sequence is strictly ordered on any machine and any date:
+    # first capture < grading < newer capture < recheck < review (now) < kickoff.
+    anchor = datetime.now(timezone.utc).replace(microsecond=0)
+    kickoff = (anchor + timedelta(days=3)).isoformat()
+    graded_at = anchor - timedelta(minutes=15)
+    rechecked_at = anchor - timedelta(minutes=5)
+    real_grade_week, real_recheck_card = adapter_module.grade_week, adapter_module.recheck_card
+    monkeypatch.setattr(adapter_module, "grade_week", lambda market, prices, **kwargs:
+                        real_grade_week(market, prices, **{"graded_at": graded_at, **kwargs}))
+    monkeypatch.setattr(adapter_module, "recheck_card", lambda card, market, prices, **kwargs:
+                        real_recheck_card(card, market, prices, **{"rechecked_at": rechecked_at, **kwargs}))
+
     history = LocalHistory(tmp_path)
-    first = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"})
+    first = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"},
+                     captured=(anchor - timedelta(minutes=20)).isoformat(), kickoff=kickoff)
     monkeypatch.setattr(page, "LocalHistory", lambda: history)
     monkeypatch.setattr(market_data, "LocalHistory", lambda: history)
     app = AppTest.from_file(APP, default_timeout=30).run()
@@ -481,8 +499,9 @@ def test_streamlit_execution_placement_form_waits_for_new_confirmed_recheck(tmp_
     next(item for item in app.button if item.label == "Use this slate for proposal").click().run()
     next(item for item in app.button if item.label == "Build proposal from saved NFL slate").click().run()
     assert not any(item.label == "Record operator-reported PLACED status" for item in app.button)
+    assert app.session_state["card"].graded_at == graded_at.isoformat()
     second = snapshot(history, "EXECUTION", prices={"2": "+170", "3": "+170"},
-                      captured=datetime.now(timezone.utc).isoformat())
+                      captured=(anchor - timedelta(minutes=10)).isoformat(), kickoff=kickoff)
     app.run()
     chooser = next(item for item in app.selectbox if item.label == "Saved NFL market snapshot")
     chooser.set_value(second["snapshot_id"]).run()
@@ -492,6 +511,11 @@ def test_streamlit_execution_placement_form_waits_for_new_confirmed_recheck(tmp_
     recheck.click().run()
     assert not app.exception
     assert app.session_state["recheck"].verdict == "VALIDATED"
+    assert app.session_state["recheck"].rechecked_at == rechecked_at.isoformat()
+    assert execution_status(app.session_state["nfl_card_context"], app.session_state["nfl_recheck_context"],
+                            app.session_state["card"], app.session_state["recheck"], app.session_state["slate"],
+                            now=datetime.now(timezone.utc)) == (
+        True, "Confirmed sportsbook EXECUTION slate and fresh validated recheck")
     assert any(item.label == "Record operator-reported PLACED status" for item in app.button)
     assert history.live_placements() == []
     mismatched = deepcopy(app.session_state["slate"])
