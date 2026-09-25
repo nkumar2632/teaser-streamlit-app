@@ -365,3 +365,115 @@ def test_apple_vision_extractor_keeps_coordinates_and_removes_temporary_image(mo
     assert not _os.path.exists(seen["path"])
     assert (lines[0].x, lines[0].y) == (.05, .86)
     assert (lines[1].x, lines[1].y) == (None, None)
+
+
+# Minimal Bluecoins-style NFL board (synthetic; mirrors the observed layout, not a real capture).
+BOARD_CAPTURED = "2026-09-27T10:05:00-04:00"
+BLUECOINS_BOARD = [
+    ("SUNDAY, SEP 27", None),
+    ("01:00 PM EST - FOX", None),
+    ("_ Seattle Seahawks (2-0)", ("PROPS", "-7½ -110", "-375", "O 40 -110")),
+    ("W Washington Commanders (0-2)", ("932+", "+7½ -110", "+305", "U 40 -110")),
+    ("01:00 PM EST - CBS", None),
+    ("1E/ Cincinnati Bengals (2-0)", ("PROPS", "-3½ -110", "-185", "O 42½ -110")),
+    ("Pittsburgh Steelers (1-1)", ("958+", "+3½ -110", "+155", "U 42½ -110")),
+    ("New England Patriots (1-1)", ("PROPS", "+3 -110", "+135", "0 46 -110")),
+    ("Jacksonville Jaguars (1-1)", ("1942+", "-3 -110", "-155", "U 46 -110")),
+    ("04:05 PM EST - FOX", None),
+    ("Arizona Cardinals (1-1)", ("PROPS", "+8½ -110", "+335", "0 48 -110")),
+    ("San Francisco 49ers (2-0)", ("978+", "-8½ -110", "-425", "U 48 -110")),
+    ("04:25 PM EST - @ MARACANA STADIUM - RIO DE JANEIRO, BRAZIL (CBS)", None),
+    ("Baltimore Ravens (1-1)", ("PROPS", "-3 -125", "-180", "O 53 -110")),
+    ("Dallas Cowboys (1-1)", ("1630+", "+3 +105", "+160", "U 53 -110")),
+    ("08:20 PM EST - NBC", None),
+    ("Los Angeles Rams (1-1)", ("PROPS", "-2½ -110", "-140", "O 44½ -110")),
+    ("Denver Broncos (1-1)", ("1161+", "+2½ -110", "+120", "U 44½ -110")),
+    ("MONDAY, SEP 28", None),
+    ("08:15 PM EST - ABC/ESPN", None),
+    ("Philadelphia Eagles (2-0)", ("PROPS", "-4½ -110", "-225", "O 41 -110")),
+    ("Chicago Bears (1-1)", ("770+", "+4½ -110", "+185", "U 41 -110")),
+]
+BOARD_EXPECTED = [
+    ("Seattle Seahawks", "Washington Commanders", "2026-09-27T13:00:00-04:00", "-7.5", "+7.5", "40"),
+    ("Cincinnati Bengals", "Pittsburgh Steelers", "2026-09-27T13:00:00-04:00", "-3.5", "+3.5", "42.5"),
+    ("New England Patriots", "Jacksonville Jaguars", "2026-09-27T13:00:00-04:00", "+3", "-3", "46"),
+    ("Arizona Cardinals", "San Francisco 49ers", "2026-09-27T16:05:00-04:00", "+8.5", "-8.5", "48"),
+    ("Baltimore Ravens", "Dallas Cowboys", "2026-09-27T16:25:00-04:00", "-3", "+3", "53"),
+    ("Los Angeles Rams", "Denver Broncos", "2026-09-27T20:20:00-04:00", "-2.5", "+2.5", "44.5"),
+    ("Philadelphia Eagles", "Chicago Bears", "2026-09-28T20:15:00-04:00", "-4.5", "+4.5", "41"),
+]
+
+
+def _positioned_board(sha="board"):
+    lines, top = [], .98
+    for label, cells in BLUECOINS_BOARD:
+        lines.append(OCRLine(label, .95, sha, .03, top))
+        for cell, x in zip(cells or (), (.35, .43, .61, .76)):
+            lines.append(OCRLine(cell, .95, sha, x, top + .002))
+        top -= .022
+    return lines
+
+
+def _board_rows(candidates):
+    return [(row["away_team"], row["home_team"], row["kickoff"], row["spread_away"], row["spread_home"],
+             row["total"]) for row in candidates]
+
+
+def test_bluecoins_board_yields_canonical_teams_half_points_and_header_kickoffs():
+    candidates, _, _, warnings = parse_recognized_lines(layout_rows(_positioned_board()), "NFL",
+                                                        captured_at=BOARD_CAPTURED)
+    assert _board_rows(candidates) == BOARD_EXPECTED
+    assert all(row["moneyline_away"] is None and row["moneyline_home"] is None for row in candidates)
+    assert all(row["field_states"]["kickoff"] == "high_confidence" for row in candidates)
+    assert not any(row["warnings"] for row in candidates)
+    assert not any("Unpaired" in warning for warning in warnings)
+
+
+def test_bluecoins_board_extracts_and_confirms_without_manual_edits(tmp_path):
+    class BoardExtractor:
+        name = "positioned_fixture"
+
+        def extract(self, image):
+            return _positioned_board(image.sha256)
+
+    preview = extract_screenshots(checked_files(1), "NFL", "bluecoins.ag", BOARD_CAPTURED, BoardExtractor())
+    assert _board_rows(preview.candidates) == BOARD_EXPECTED
+    assert "SUNDAY, SEP 27" in preview.recognized_text[0]
+    snapshot = normalize_screenshot_review(preview, [dict(row) for row in preview.candidates], {"2": "", "3": ""})
+    assert [(e["spread_away"], e["total"]) for e in snapshot["events"]][:2] == [("-7.5", "40"), ("-3.5", "42.5")]
+
+
+@pytest.mark.parametrize("unreadable", ["-3% -110 O 42% -110", "-31/2 -110 O 421/2 -110"])
+def test_unreadable_half_points_stay_blank_never_rounded(unreadable):
+    lines = [OCRLine(text, .95, "a") for text in (
+        "SUNDAY, SEP 27", "01:00 PM EST - CBS", f"Cincinnati Bengals (2-0) PROPS {unreadable}",
+        "Pittsburgh Steelers (1-1) 958+ +3½ -110 U 42½ -110")]
+    candidates, _, _, _ = parse_recognized_lines(lines, "NFL", captured_at=BOARD_CAPTURED)
+    row = candidates[0]
+    assert row["spread_away"] is None and row["spread_home"] == "+3.5"
+    assert row["total"] == "42.5" and row["over_price"] is None  # only the readable under side
+
+
+def test_team_rows_with_zero_or_several_nfl_teams_stay_for_review():
+    lines = [OCRLine(text, .95, "a") for text in (
+        "Cincinati Bengal (2-0) PROPS -3½ -110", "Pittsburgh Steelers Cleveland Browns 958+ +3½ -110")]
+    row = parse_recognized_lines(lines, "NFL")[0][0]
+    assert row["away_team"] == "Cincinati Bengal (2-0) PROPS"
+    assert row["home_team"] == "Pittsburgh Steelers Cleveland Browns 958+"
+    assert row["field_states"]["away_team"] == row["field_states"]["home_team"] == "uncertain"
+    assert "No NFL team recognized in OCR row; review team" in row["warnings"]
+    assert "Several NFL teams in one OCR row; review team" in row["warnings"]
+
+
+@pytest.mark.parametrize("headers, captured", [
+    (["01:00 PM EST - CBS"], BOARD_CAPTURED),                        # no board date
+    (["SUNDAY, SEP 27", "12:00 PM CT - CBS"], BOARD_CAPTURED),       # non-Eastern label
+    (["SATURDAY, SEP 27", "01:00 PM EST - CBS"], BOARD_CAPTURED),    # weekday disagrees
+    (["SUNDAY, SEP 27", "01:00 PM EST - CBS"], None),                # no capture year
+])
+def test_kickoff_is_left_blank_when_board_headers_cannot_be_resolved(headers, captured):
+    lines = [OCRLine(text, .95, "a") for text in (
+        *headers, "Cincinnati Bengals (2-0) -3½ -110", "Pittsburgh Steelers (1-1) +3½ -110")]
+    row = parse_recognized_lines(lines, "NFL", captured_at=captured)[0][0]
+    assert row["kickoff"] is None and row["field_states"]["kickoff"] == "missing"
+    assert "Kickoff header could not be resolved; enter kickoff in review" in row["warnings"]

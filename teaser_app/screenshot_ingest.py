@@ -11,14 +11,15 @@ import subprocess
 import tempfile
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePath
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from PIL import Image, UnidentifiedImageError
 
-from teaser_app.market_compare import team_key
+from teaser_app.market_compare import NFL_NAMES, _clean, team_key
 from teaser_app.market_data import FIELDS, _identity
 
 MAX_SCREENSHOTS = 6
@@ -237,6 +238,54 @@ COLUMN_HEADERS = {"spread", "spreads", "total", "totals", "moneyline", "money li
                   "game lines", "game", "handicap", "team", "teams", "more bets", "props"}
 
 
+# Bluecoins board context: a date header ("SUNDAY, SEP 27") and per-game time headers
+# ("01:00 PM EST - FOX"). Board times are read as America/New_York wall-clock times.
+DATE_HEADER = re.compile(r"\b(MON|TUE|WED|THU|FRI|SAT|SUN)[A-Z]*\.?,?\s+"
+                         r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s+(\d{1,2})\b", re.I)
+GAME_TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s*(AM|PM)\s*(EST|EDT|ET)\b", re.I)
+BOARD_ZONE = ZoneInfo("America/New_York")
+MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def _half_points(text: str) -> str:
+    """Bluecoins prints half points as ½ (-7½, 42½, +½); parse them as exact .5 values."""
+    text = re.sub(r"(?<=\d)\s?½", ".5", text)
+    return re.sub(r"(?<![\d.])½", "0.5", text)
+
+
+def _board_date(match: re.Match, reference: datetime | None) -> date | None:
+    """Resolve "SUNDAY, SEP 27" against the capture date; None unless the weekday agrees."""
+    if reference is None:
+        return None
+    month, day = MONTHS.index(match.group(2).upper()[:3]) + 1, int(match.group(3))
+    options = []
+    for year in (reference.year - 1, reference.year, reference.year + 1):
+        try:
+            options.append(date(year, month, day))
+        except ValueError:
+            continue
+    if not options:
+        return None
+    chosen = min(options, key=lambda option: abs((option - reference.date()).days))
+    return chosen if chosen.strftime("%a").upper() == match.group(1).upper()[:3] else None
+
+
+def _header_kickoff(text: str, board_date: date | None) -> str | None:
+    match = GAME_TIME.search(text)
+    if not match or board_date is None:
+        return None
+    hour, minute = int(match.group(1)) % 12 + (12 if match.group(3).upper() == "PM" else 0), int(match.group(2))
+    if minute > 59 or int(match.group(1)) > 12:
+        return None
+    return datetime(board_date.year, board_date.month, board_date.day, hour, minute,
+                    tzinfo=BOARD_ZONE).isoformat()
+
+
+def _nfl_teams_in(name: str) -> list[str]:
+    padded = f" {_clean(name)} "
+    return [full for full in NFL_NAMES.values() if f" {_clean(full)} " in padded]
+
+
 def _board_furniture(name: str) -> bool:
     return (not re.search(r"[A-Za-z]{2,}", name) or "$" in name or re.search(r"\d,\d{3}", name) is not None
             or GAME_HEADER.search(name) is not None or name.casefold() in COLUMN_HEADERS)
@@ -262,8 +311,10 @@ def _market_values(text: str) -> dict:
     ml = re.search(r"\bML\s*([+-]\d{3,5})(?!\d)", text, re.I)
     if ml:
         values["moneyline"] = ml.group(1)
-    over = re.search(r"\bO(?:VER)?\s*([0-9]+(?:\.5)?)\s*([+-]\d{3,5})?", text, re.I)
-    under = re.search(r"\bU(?:NDER)?\s*([0-9]+(?:\.5)?)\s*([+-]\d{3,5})?", text, re.I)
+    over = (re.search(r"\bO(?:VER)?\s*([0-9]+(?:\.5)?)(?![0-9./%,½])\s*([+-]\d{3,5})?", text, re.I)
+            # Bluecoins' O renders like a zero: accept "0 42.5 -110" only as a whole total cell.
+            or re.search(r"(?<![\w.+-])0\s+([0-9]{2,3}(?:\.5)?)(?![0-9./%,½])\s+([+-]\d{3,5})", text))
+    under = re.search(r"\bU(?:NDER)?\s*([0-9]+(?:\.5)?)(?![0-9./%,½])\s*([+-]\d{3,5})?", text, re.I)
     total = over or under or re.search(r"\bTOTAL\s*([0-9]+(?:\.5)?)", text, re.I)
     if total:
         values["total"] = total.group(1)
@@ -274,15 +325,23 @@ def _market_values(text: str) -> dict:
     return values
 
 
-def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict], dict, dict, list[str]]:
+def parse_recognized_lines(lines: list[OCRLine], league: str, *,
+                           captured_at: str | None = None) -> tuple[list[dict], dict, dict, list[str]]:
     """Conservative layout-agnostic parser; uncertain output always remains reviewable."""
     warnings, team_lines, ignored = [], [], []
     block = 0
+    try:
+        reference = datetime.fromisoformat(captured_at).astimezone(BOARD_ZONE) if captured_at else None
+    except (TypeError, ValueError):
+        reference = None
+    board_date = None
+    block_kickoffs: dict[int, tuple[str | None, OCRLine]] = {}
     teaser_prices = {"2": None, "3": None}
     teaser_states = {"2": "missing", "3": "missing"}
     for line in lines:
         text = " ".join(line.text.split())
         # Vision commonly inserts a space after a sign or joins spread and price.
+        text = _half_points(text)
         text = re.sub(r"([+-])\s+(?=\d)", r"\1", text)
         text = re.sub(r"([+-]\d{1,2}(?:\.\d+)?)([+-]\d{3,5})(?!\d)", r"\1 \2", text)
         lower = text.casefold()
@@ -303,15 +362,31 @@ def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict
             else:
                 warnings.append(f"Unclassified teaser text requires review: {text[:120]}")
             continue
+        dated = DATE_HEADER.search(text)
+        if dated:
+            board_date = _board_date(dated, reference)
+            if board_date is None:
+                warnings.append(f"Board date could not be resolved; enter kickoffs in review: {dated.group(0)}")
         name = _team_text(text)
         if GAME_HEADER.search(name):
             block += 1  # a new game header: never pair a team row across it
+            block_kickoffs[block] = (_header_kickoff(text, board_date), line)
+            continue
+        if dated:
             continue
         if len(name) >= 2 and _numbers(text):
             if _board_furniture(name):
                 ignored.append(name)
-            else:
-                team_lines.append((name, _market_values(text), line, block))
+                continue
+            note = None
+            if league == "NFL" and not team_key("NFL", name):
+                found = _nfl_teams_in(name)
+                if len(found) == 1:
+                    name = found[0]
+                else:
+                    note = ("No NFL team recognized in OCR row; review team" if not found
+                            else "Several NFL teams in one OCR row; review team")
+            team_lines.append((name, _market_values(text), line, block, note))
     if ignored:
         warnings.append(f"Ignored {len(ignored)} non-team OCR fragment(s): {', '.join(ignored[:5])}")
     pairs = []
@@ -321,13 +396,17 @@ def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict
         if len(members) % 2:
             warnings.append(f"Unpaired OCR row requires manual review: {members[-1][0]}")
     candidates = []
-    for (away, away_values, away_line, _), (home, home_values, home_line, _) in pairs:
+    for (away, away_values, away_line, pair_block, away_note), (home, home_values, home_line, _, home_note) in pairs:
         if away.casefold() == home.casefold():
             warnings.append(f"Duplicate team OCR row ignored: {away}")
             continue
         confidence = min(away_line.confidence, home_line.confidence)
         row = _candidate(away, home, away_line.source_sha256, confidence)
         row["field_sources"]["home_team"] = [home_line.source_sha256]
+        for side, note in (("away_team", away_note), ("home_team", home_note)):
+            if note:
+                row["field_states"][side] = "uncertain"
+                row["warnings"].append(note)
         kickoffs = {value for value in (_kickoff(away_line.text), _kickoff(home_line.text)) if value}
         if len(kickoffs) == 1:
             row["kickoff"] = next(iter(kickoffs))
@@ -337,6 +416,15 @@ def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict
             row["field_states"]["kickoff"] = "conflict"
             row["conflicts"]["kickoff"] = sorted(kickoffs)
             row["warnings"].append("Conflicting kickoff")
+        elif pair_block in block_kickoffs:
+            header_kickoff, header_line = block_kickoffs[pair_block]
+            if header_kickoff:
+                row["kickoff"] = header_kickoff
+                row["field_states"]["kickoff"] = ("high_confidence" if header_line.confidence >= .85
+                                                  else "uncertain")
+                row["field_sources"]["kickoff"] = [header_line.source_sha256]
+            else:
+                row["warnings"].append("Kickoff header could not be resolved; enter kickoff in review")
         for side, values, source_line in (("away", away_values, away_line), ("home", home_values, home_line)):
             for raw, field in (("spread", f"spread_{side}"), ("spread_price", f"spread_{side}_price"),
                                ("moneyline", f"moneyline_{side}")):
@@ -437,7 +525,8 @@ def extract_screenshots(files: tuple[ScreenshotFile, ...], league: str, sportsbo
         recognized.append("\n".join(line.text for line in lines))
         if not lines:
             warnings.append(f"No text recognized in {image.filename}")
-    candidates, teaser_prices, teaser_states, parsed_warnings = parse_recognized_lines(all_lines, league)
+    candidates, teaser_prices, teaser_states, parsed_warnings = parse_recognized_lines(
+        all_lines, league, captured_at=captured.isoformat())
     warnings.extend(parsed_warnings)
     return ScreenshotPreview(league, sportsbook.strip(), captured.isoformat(), datetime.now(timezone.utc).isoformat(),
                              extractor.name, files, tuple(merge_candidates(candidates, league)),
@@ -451,7 +540,8 @@ def reparse_review_text(preview: ScreenshotPreview, texts: list[str]) -> Screens
     lines = [OCRLine(line.strip(), .5, image.sha256)
              for image, text in zip(preview.files, texts)
              for line in str(text).splitlines() if line.strip()]
-    candidates, prices, states, parse_warnings = parse_recognized_lines(lines, preview.league)
+    candidates, prices, states, parse_warnings = parse_recognized_lines(
+        lines, preview.league, captured_at=preview.captured_at)
     warnings_out = [warning for warning in preview.warnings
                     if not warning.startswith(("No text recognized", "No complete games", "Unpaired OCR"))]
     warnings_out.extend(parse_warnings)
