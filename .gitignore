@@ -25,5 +25,6 @@ market_data/results/*.json
 market_data/result_snapshots/*.json
 market_data/placements/*.json
 market_data/live_settlements/*.json
+market_data/menu_verifications/*.json
 market_data/raw/*
 market_data/screenshots/*
