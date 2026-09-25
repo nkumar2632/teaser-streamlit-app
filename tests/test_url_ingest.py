@@ -180,6 +180,37 @@ def test_cfb_reference_save_is_separate_from_paper_runs(tmp_path):
     assert history.runs(status="PAPER") == []
 
 
+def _cfb_with_off_board_moneylines(sentinel: str = "OFF") -> bytes:
+    payload = json.loads(fixture("espn_cfb_scoreboard.json"))
+    moneyline = payload["events"][0]["competitions"][0]["odds"][0]["moneyline"]
+    moneyline["away"]["close"]["odds"] = sentinel
+    moneyline["home"]["close"]["odds"] = sentinel
+    return json.dumps(payload).encode()
+
+
+@pytest.mark.parametrize("sentinel", ["OFF", "off"])
+def test_espn_off_board_moneyline_is_not_offered_rather_than_malformed(sentinel):
+    rows, warnings = parse_scoreboard(_cfb_with_off_board_moneylines(sentinel), "CFB")
+    assert rows[0]["moneyline_away"] is None
+    assert rows[0]["moneyline_home"] is None
+    assert (rows[0]["spread_away"], rows[0]["spread_home"], rows[0]["total"]) == ("-4", "+4", "56.5")
+    assert (rows[0]["spread_away_price"], rows[0]["over_price"]) == ("-108", "-108")
+    assert not any("malformed" in warning for warning in warnings)
+
+
+def test_espn_off_board_moneylines_confirm_without_manual_edits(tmp_path):
+    history = LocalHistory(tmp_path)
+    preview = preview_url(CFB_URL, client=_Client(_cfb_with_off_board_moneylines()))
+    assert not any("malformed" in warning for warning in preview.warnings)
+    saved = save_confirmed_snapshot(preview, [dict(row) for row in preview.rows], history)
+    assert saved["market_role"] == "REFERENCE" and saved["league"] == "CFB"
+    assert saved["events"][0]["moneyline_away"] is None
+    assert saved["events"][0]["moneyline_home"] is None
+    assert saved["events"][0]["spread_home"] == "+4" and saved["events"][0]["total"] == "56.5"
+    assert "OFF" not in json.dumps(saved)
+    assert history.get_snapshot(saved["snapshot_id"]) == saved
+
+
 def test_malformed_price_or_duplicate_review_cannot_create_snapshot(tmp_path):
     history = LocalHistory(tmp_path)
     preview = preview_url(NFL_URL, client=_Client(fixture("espn_nfl_scoreboard.json")))

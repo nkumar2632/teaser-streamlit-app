@@ -21,6 +21,16 @@ def _as_text(value) -> str | None:
     return str(value).strip() if value is not None and str(value).strip() else None
 
 
+# ESPN shows an off-the-board moneyline as a literal sentinel rather than odds.
+_OFF_BOARD_MONEYLINE = "off"
+
+
+def _as_moneyline(value) -> str | None:
+    """A moneyline ESPN marks OFF is not offered: blank, never a number and never malformed."""
+    text = _as_text(value)
+    return None if text is not None and text.casefold() == _OFF_BOARD_MONEYLINE else text
+
+
 def _nested(record: dict, *keys):
     for key in keys:
         if not isinstance(record, dict):
@@ -82,8 +92,8 @@ def parse_scoreboard(raw: bytes, league: str) -> tuple[list[dict], list[str]]:
             "spread_away_price": _as_text(_nested(odds, "pointSpread", "away", "close", "odds")),
             "spread_home": _as_text(_nested(odds, "pointSpread", "home", "close", "line")),
             "spread_home_price": _as_text(_nested(odds, "pointSpread", "home", "close", "odds")),
-            "moneyline_away": _as_text(_nested(odds, "moneyline", "away", "close", "odds")),
-            "moneyline_home": _as_text(_nested(odds, "moneyline", "home", "close", "odds")),
+            "moneyline_away": _as_moneyline(_nested(odds, "moneyline", "away", "close", "odds")),
+            "moneyline_home": _as_moneyline(_nested(odds, "moneyline", "home", "close", "odds")),
             "total": _as_text(odds.get("overUnder")),
             "over_price": _as_text(_nested(odds, "total", "over", "close", "odds")),
             "under_price": _as_text(_nested(odds, "total", "under", "close", "odds")),
