@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -20,6 +21,7 @@ from teaser_app.screenshot_ingest import (
     extract_screenshots,
     merge_candidates,
     normalize_screenshot_review,
+    layout_rows,
     parse_recognized_lines,
     reparse_review_text,
     save_confirmed_execution,
@@ -293,3 +295,73 @@ def test_confirmation_rejects_malformed_values_duplicate_events_and_reference_pa
     with pytest.raises(ValueError, match="confirmed sportsbook"):
         history.save_confirmed_execution({"schema_version": 2, "market_role": "REFERENCE", "events": [{}]})
     assert history.market_history() == [] and history.runs(status="PAPER") == []
+
+
+def _bluecoins_board(sha: str = "board") -> list[OCRLine]:
+    """Positioned Apple Vision fragments shaped like a Bluecoins NFL board (row-major, top first)."""
+    fragments = [
+        (.90, [("01:00 PM EST - FOX", .05), ("$2,000", .80)]),
+        (.86, [("451 Dallas Cowboys", .05), ("+2.5 -110", .45), ("O 44 -110", .62), ("+115", .80), ("932+", .93)]),
+        (.82, [("452 New York Giants", .05), ("-2.5 -110", .45), ("U 44 -110", .62), ("-135", .80)]),
+        (.76, [("04:25 PM EST - CBS", .05), ("$2,000", .80)]),
+        (.72, [("453 Kansas City Chiefs", .05), ("-3.5 -110", .45), ("O 46.5 -110", .62), ("-175", .80), ("411+", .93)]),
+        (.68, [("454 Denver Broncos", .05), ("+3.5 -110", .45), ("U 46.5 -110", .62), ("+150", .80)]),
+    ]
+    return [OCRLine(text, .95, sha, x, y) for y, row in fragments for text, x in row]
+
+
+def test_positioned_bluecoins_fragments_rebuild_rows_and_never_pair_headers_limits_or_counters():
+    rows = layout_rows(_bluecoins_board())
+    assert rows[1].text == "451 Dallas Cowboys +2.5 -110 O 44 -110 +115 932+"
+    candidates, _, _, warnings = parse_recognized_lines(rows, "NFL")
+    assert [(row["away_team"], row["home_team"]) for row in candidates] == [
+        ("Dallas Cowboys", "New York Giants"), ("Kansas City Chiefs", "Denver Broncos")]
+    first, second = candidates
+    assert (first["spread_away"], first["spread_home"], first["total"]) == ("+2.5", "-2.5", "44")
+    assert (first["over_price"], first["under_price"]) == ("-110", "-110")
+    assert (second["spread_away"], second["spread_home"], second["total"]) == ("-3.5", "+3.5", "46.5")
+    names = " ".join(row[side] for row in candidates for side in ("away_team", "home_team"))
+    assert not any(junk in names for junk in ("PM", "EST", "FOX", "$", "2,000", "932", "411", "451"))
+    assert not any("Unpaired" in warning for warning in warnings)
+
+
+def test_unpositioned_board_fragments_are_not_team_names():
+    lines = [OCRLine(text, .95, "a") for text in (
+        "01:00 PM EST - FOX", "$2,000", "932+",
+        "Dallas Cowboys +2.5 -110", "New York Giants -2.5 -110", "Total 44", "O 44 -110")]
+    candidates, _, _, warnings = parse_recognized_lines(lines, "NFL")
+    assert [(row["away_team"], row["home_team"]) for row in candidates] == [("Dallas Cowboys", "New York Giants")]
+    assert not any("Unpaired" in warning for warning in warnings)
+    assert any("Ignored" in warning and "932+" in warning for warning in warnings)
+
+
+def test_team_rows_are_never_paired_across_a_game_header():
+    lines = [OCRLine(text, .95, "a") for text in (
+        "01:00 PM EST - FOX", "Dallas Cowboys +2.5 -110",
+        "04:25 PM EST - CBS", "Kansas City Chiefs -3.5 -110", "Denver Broncos +3.5 -110")]
+    candidates, _, _, warnings = parse_recognized_lines(lines, "NFL")
+    assert [(row["away_team"], row["home_team"]) for row in candidates] == [("Kansas City Chiefs", "Denver Broncos")]
+    assert any("Unpaired OCR row requires manual review: Dallas Cowboys" in warning for warning in warnings)
+
+
+def test_apple_vision_extractor_keeps_coordinates_and_removes_temporary_image(monkeypatch):
+    import json as _json
+    import os as _os
+    import teaser_app.screenshot_ingest as ingest
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"], seen["path"] = argv, argv[-1]
+        assert _os.path.exists(argv[-1])
+        payload = [{"text": "451 Dallas Cowboys", "confidence": .9, "x": .05, "y": .86},
+                   {"text": "no position", "confidence": .8}]
+        return SimpleNamespace(returncode=0, stdout=_json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(ingest.subprocess, "run", fake_run)
+    image = checked_files(1)[0]
+    lines = ingest.AppleVisionExtractor().extract(image)
+    assert seen["argv"][:2] == ["/usr/bin/xcrun", "swift"]
+    assert not _os.path.exists(seen["path"])
+    assert (lines[0].x, lines[0].y) == (.05, .86)
+    assert (lines[1].x, lines[1].y) == (None, None)

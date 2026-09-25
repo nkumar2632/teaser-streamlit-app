@@ -62,6 +62,10 @@ class OCRLine:
     text: str
     confidence: float
     source_sha256: str
+    # Apple Vision normalized position (0..1): left edge and top edge, origin bottom-left.
+    # None when the extractor supplies no layout (manual text, fixtures, reparsed review text).
+    x: float | None = None
+    y: float | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,38 @@ class ScreenshotExtractor(Protocol):
     name: str
 
     def extract(self, image: ScreenshotFile) -> list[OCRLine]: ...
+
+
+def _coordinate(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if 0 <= value <= 1 else None
+
+
+# Fragments whose top edges differ by at most this fraction of the image height share a visual row.
+ROW_TOLERANCE = 0.012
+
+
+def layout_rows(lines: list[OCRLine]) -> list[OCRLine]:
+    """Rebuild visual rows from positioned OCR fragments of one screenshot.
+
+    A sportsbook board is read column by column (team, spread, total, moneyline), so each
+    row is re-joined left to right before parsing. Unpositioned input is returned unchanged.
+    """
+    if not lines or any(line.x is None or line.y is None for line in lines):
+        return list(lines)
+    rows: list[list[OCRLine]] = []
+    for line in sorted(lines, key=lambda item: (-item.y, item.x)):
+        if rows and abs(rows[-1][0].y - line.y) <= ROW_TOLERANCE:
+            rows[-1].append(line)
+        else:
+            rows.append([line])
+    merged = []
+    for row in rows:
+        row.sort(key=lambda item: item.x)
+        merged.append(OCRLine(" ".join(item.text.strip() for item in row),
+                              min(item.confidence for item in row), row[0].source_sha256, row[0].x, row[0].y))
+    return merged
 
 
 class AppleVisionExtractor:
@@ -110,7 +146,8 @@ class AppleVisionExtractor:
             payload = json.loads(result.stdout)
             if not isinstance(payload, list) or len(payload) > 1000:
                 raise ScreenshotIngestError("Local OCR returned an invalid result")
-            return [OCRLine(str(item["text"])[:500], float(item["confidence"]), image.sha256)
+            return [OCRLine(str(item["text"])[:500], float(item["confidence"]), image.sha256,
+                            _coordinate(item.get("x")), _coordinate(item.get("y")))
                     for item in payload if isinstance(item, dict) and item.get("text")]
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, ScreenshotIngestError):
@@ -188,7 +225,21 @@ def _numbers(text: str) -> list[str]:
 def _team_text(text: str) -> str:
     marker = re.search(r"(?:\s|^)(?:[+-]\d|ML\b|O\s*\d|U\s*\d|TOTAL\b)", text, re.I)
     name = text[:marker.start()] if marker else text
-    return KICKOFF.sub("", name).strip(" -–|@")
+    name = KICKOFF.sub("", name).strip(" -–|@")
+    return ROTATION.sub("", name).strip(" -–|@")
+
+
+# Board furniture that carries digits but is never a team: game times / TV headers
+# ("01:00 PM EST - FOX"), limits ("$2,000"), prop counters ("932+") and column headers.
+GAME_HEADER = re.compile(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b|\b(?:EST|EDT|CST|CDT|MST|MDT|PST|PDT)\b", re.I)
+ROTATION = re.compile(r"^\d{3,4}\s+(?=[A-Za-z])")
+COLUMN_HEADERS = {"spread", "spreads", "total", "totals", "moneyline", "money line", "ml", "over", "under",
+                  "game lines", "game", "handicap", "team", "teams", "more bets", "props"}
+
+
+def _board_furniture(name: str) -> bool:
+    return (not re.search(r"[A-Za-z]{2,}", name) or "$" in name or re.search(r"\d,\d{3}", name) is not None
+            or GAME_HEADER.search(name) is not None or name.casefold() in COLUMN_HEADERS)
 
 
 def _kickoff(text: str) -> str | None:
@@ -225,7 +276,8 @@ def _market_values(text: str) -> dict:
 
 def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict], dict, dict, list[str]]:
     """Conservative layout-agnostic parser; uncertain output always remains reviewable."""
-    warnings, team_lines = [], []
+    warnings, team_lines, ignored = [], [], []
+    block = 0
     teaser_prices = {"2": None, "3": None}
     teaser_states = {"2": "missing", "3": "missing"}
     for line in lines:
@@ -252,12 +304,24 @@ def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict
                 warnings.append(f"Unclassified teaser text requires review: {text[:120]}")
             continue
         name = _team_text(text)
+        if GAME_HEADER.search(name):
+            block += 1  # a new game header: never pair a team row across it
+            continue
         if len(name) >= 2 and _numbers(text):
-            team_lines.append((name, _market_values(text), line))
+            if _board_furniture(name):
+                ignored.append(name)
+            else:
+                team_lines.append((name, _market_values(text), line, block))
+    if ignored:
+        warnings.append(f"Ignored {len(ignored)} non-team OCR fragment(s): {', '.join(ignored[:5])}")
+    pairs = []
+    for current in sorted({entry[3] for entry in team_lines}):
+        members = [entry for entry in team_lines if entry[3] == current]
+        pairs.extend(zip(members[0::2], members[1::2]))
+        if len(members) % 2:
+            warnings.append(f"Unpaired OCR row requires manual review: {members[-1][0]}")
     candidates = []
-    for index in range(0, len(team_lines) - 1, 2):
-        away, away_values, away_line = team_lines[index]
-        home, home_values, home_line = team_lines[index + 1]
+    for (away, away_values, away_line, _), (home, home_values, home_line, _) in pairs:
         if away.casefold() == home.casefold():
             warnings.append(f"Duplicate team OCR row ignored: {away}")
             continue
@@ -300,8 +364,6 @@ def parse_recognized_lines(lines: list[OCRLine], league: str) -> tuple[list[dict
                 row["field_states"]["spread_away"] = "uncertain"
                 row["field_states"]["spread_home"] = "uncertain"
         candidates.append(row)
-    if len(team_lines) % 2:
-        warnings.append(f"Unpaired OCR row requires manual review: {team_lines[-1][0]}")
     if not candidates:
         warnings.append("No complete games were recognized; add rows manually in review")
     return candidates, teaser_prices, teaser_states, warnings
@@ -370,7 +432,7 @@ def extract_screenshots(files: tuple[ScreenshotFile, ...], league: str, sportsbo
         raise ScreenshotIngestError("Capture time requires an ISO timestamp with UTC offset") from exc
     all_lines, recognized, warnings = [], [], []
     for image in files:
-        lines = extractor.extract(image)
+        lines = layout_rows(extractor.extract(image))
         all_lines.extend(lines)
         recognized.append("\n".join(line.text for line in lines))
         if not lines:
