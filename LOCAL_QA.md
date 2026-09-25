@@ -1,21 +1,25 @@
-# Saturday CFB local QA
+# Gate A — Saturday CFB PAPER
 
 The Claude verification pack is unavailable in this workspace. Its exact 6/6 golden-fixture verification is **pending local QA tonight**. Do not recreate expected outputs or change the frozen model to make that pack pass.
 
-1. Start the app locally: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/streamlit run app.py --server.address 127.0.0.1`.
-2. Select **CFB · PAPER**. In **Public Lines · fetch and review ESPN**, choose the Saturday date, fetch the CFB scoreboard, review lines/kickoffs, and confirm the REFERENCE snapshot.
-3. In **Public CFB lines**, review usable and excluded games, select the saved snapshot, and click **Use this slate for proposal**. Confirm that no manual quoted-side entry is needed.
-4. Build once with missing teaser prices. Check ranked legs, constructed tickets, unavailable EV for unpriced sizes, the public-line and `bluecoins.ag` menu labels, and the absence of any placement control.
-5. Enter only the missing observed 6-point teaser-menu prices, build again, and check the priced PAPER card. Ordinary Streamlit reruns must retain its run ID and must not create another saved run.
-6. Run the Claude pack's own 6/6 golden-fixture instructions when the pack is available locally, compare exact outputs without changing expectations, and record the result separately. This has **not** been verified in the remote workspace.
+1. Start locally: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/streamlit run app.py --server.address 127.0.0.1`.
+2. Fetch the real Saturday ESPN CFB board, review it, and confirm the REFERENCE snapshot. **Pass:** no data is saved before Confirm.
+3. Select the saved slate and build unpriced. **Pass:** no manual sides, legs/tickets display, EV is unavailable only for missing sizes, and no placement control exists.
+4. Enter the observed 6-point prices and build priced. Refresh, then restart the app and reopen history. **Pass:** PAPER provenance and the saved run persist; reruns do not add duplicate runs; actual placements remain zero.
 
-The public ESPN response and actual sportsbook menu should be reviewed by the operator. This is a PAPER workflow; it does not authorize or place wagers.
+# Gate B — Claude golden pack
 
-# Sunday NFL local QA
+Run the pack's exact 6/6 instructions when available. **Pass:** all six exact fixtures agree without changing expected values. This remains pending local QA and was not reconstructed remotely.
 
-1. In **NFL · LIVE**, fetch and confirm a real ESPN NFL scoreboard. Choose its saved REFERENCE snapshot, use it for a proposal, and build without entering quoted sides. Check canonical teams, excluded games, the public/reference screening label, and the absence of the placement form. Missing teaser prices must leave leg grading available.
-2. Upload one or more current sportsbook screenshots on the local Mac. Review Apple Vision extraction, correct teams/lines/times/prices, and explicitly confirm an EXECUTION snapshot. Raw screenshots should not be saved in the app data area. Choose the saved EXECUTION snapshot and build; the proposal must still be unplaced.
-3. Capture and confirm a **newer** screenshot after the proposal is built. Select it for recheck. If the 6-point teaser menu is stale or missing, use **I verified these teaser prices are unchanged now** only after checking the actual sportsbook menu. Recheck the card; confirm that the operator-reported placement form appears only for a fresh, validated, same-book EXECUTION recheck before kickoff.
-4. If a wager was actually placed outside the app, rehearse the explicit placement report and verify the saved record references both confirmed snapshot IDs. Otherwise leave the card PROPOSED. A public/reference card and a mixed-book card must never expose the placement form.
+# Gate C — Apple Vision
 
-Apple Vision and real sportsbook browser behavior require the local Mac and were not verified remotely. The Claude 6/6 golden-fixture pack remains pending local QA; do not infer its expected values from app tests.
+Upload real sportsbook screenshots, run local extraction, review every value, and confirm EXECUTION. **Pass:** corrected sportsbook, capture time, lines, totals and 6-point menu persist; raw images do not; no proposal is automatically PLACED.
+
+# Gate D — Sunday NFL rehearsal
+
+1. Build an NFL REFERENCE screening proposal. **Pass:** no manual sides and no placement form, even with valid Bluecoins menu prices.
+2. Build from a confirmed same-book EXECUTION snapshot. **Pass:** it remains PROPOSED and unplaced.
+3. Confirm a distinct newer EXECUTION board, verify the current same-book menu if needed, and recheck. **Pass:** stale/wrong-book/same-snapshot cases remain blocked; only the fresh validated sequence exposes the operator-report form.
+4. Rehearse eligibility without reporting a wager. **Pass:** no placement JSON is created. Only use the report action after a wager was actually placed outside the app.
+
+Real ESPN/browser behavior, Apple Vision, the Claude pack, and an actual sportsbook recheck require the local Mac. None is claimed as remotely verified.
