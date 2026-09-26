@@ -73,7 +73,7 @@ def _clear(*, include_table: bool = True) -> None:
 def render_screenshot_import() -> None:
     with st.expander("Import my sportsbook screenshots"):
         st.caption("Images stay on this Mac. Review and confirmation are required before an immutable EXECUTION snapshot is saved; no wager is placed.")
-        sportsbook = st.text_input("Sportsbook", key="screenshot_sportsbook",
+        sportsbook = st.text_input("Sportsbook", value="bluecoins.ag", key="screenshot_sportsbook",
                                    placeholder="Enter the sportsbook shown")
         league = st.selectbox("Screenshot league", ("NFL", "CFB"), key="screenshot_league")
         captured_at = st.text_input(
@@ -171,13 +171,15 @@ def render_screenshot_import() -> None:
         if any(state in {"uncertain", "conflict"} for state in preview.teaser_states.values()):
             st.warning("Teaser pricing was uncertain or conflicting. Confirm only the standard 6-point football teaser; leave unrelated products blank.")
 
-        if st.button("Confirm EXECUTION Snapshot", type="primary", width="stretch"):
-            rows = edited_records
-            rows = [row for row in rows if any(str(row.get(field) or "").strip()
-                                               for field in REVIEW_FIELDS)]
+        rows = [row for row in edited_records if any(str(row.get(field) or "").strip()
+                                                     for field in REVIEW_FIELDS)]
+        prices = {"2": price_two, "3": price_three}
+        if preview.league == "NFL" and _render_nfl_actions(preview, rows, prices):
+            return
+        if st.button("Confirm EXECUTION Snapshot", type="primary" if preview.league != "NFL" else "secondary",
+                     width="stretch"):
             try:
-                result = save_confirmed_execution(preview, rows, {"2": price_two, "3": price_three},
-                                                  LocalHistory())
+                result = save_confirmed_execution(preview, rows, prices, LocalHistory())
             except (ScreenshotIngestError, ValueError, OSError) as exc:
                 st.error(str(exc))
             else:
@@ -188,3 +190,49 @@ def render_screenshot_import() -> None:
         if st.button("Discard screenshot preview", width="stretch"):
             _clear(include_table=False)
             st.rerun()
+
+
+def _render_nfl_actions(preview: ScreenshotPreview, rows: list[dict], prices: dict) -> bool:
+    """One-click NFL LIVE actions. Returns True after handling a click (the page reruns)."""
+    from teaser_app.nfl_market_page import _now, adopt_proposal, adopt_recheck
+    from teaser_app.nfl_workflow import (DEFAULT_TEASER_MENU, active_proposal, build_active_proposal,
+                                         recheck_active_proposal)
+
+    history = LocalHistory()
+    adapter = st.session_state.get("adapter")
+    active = active_proposal(history)
+    if active is None:
+        st.caption(f"Confirm & Build saves this EXECUTION snapshot and builds the LIVE proposal. Missing "
+                   f"teaser prices use the standard menu (2-team {DEFAULT_TEASER_MENU['2']} · 3-team "
+                   f"{DEFAULT_TEASER_MENU['3']}) as defaults only; they are verified separately before any "
+                   "placement report.")
+        clicked = st.button("Confirm & Build Proposal", type="primary", width="stretch")
+        verify = False
+    else:
+        menu = active["card_slate"]["prices"]
+        st.caption(f"Active proposal {active['card_id']} · this newer screenshot rechecks it with the same "
+                   f"teaser menu (2-team {menu.get('2') or '—'} · 3-team {menu.get('3') or '—'}).")
+        verify = st.checkbox(f"I verified these teaser prices on {active['card_context']['menu_book']} "
+                             "are unchanged now", key="screenshot_verify_menu")
+        clicked = st.button("Confirm & Recheck Active Proposal", type="primary", width="stretch")
+    if not clicked:
+        return False
+    try:
+        snapshot = save_confirmed_execution(preview, rows, prices, history)
+        if active is None:
+            view, prepared, _ = build_active_proposal(history, adapter, snapshot, now=_now())
+            adopt_proposal(view, prepared.slate, prepared.context)
+        else:
+            view = st.session_state.get("card")
+            if view is None or view.card_id != active["card_id"]:
+                raise ValueError("Open the active proposal first (it is restored on the NFL page)")
+            recheck, prepared, _ = recheck_active_proposal(history, adapter, view, active, snapshot,
+                                                           now=_now(), verify_menu=verify)
+            adopt_recheck(recheck, prepared)
+    except (ScreenshotIngestError, ValueError, RuntimeError, OSError) as exc:
+        st.error(str(exc))
+        return True
+    st.session_state.screenshot_saved_snapshot = snapshot
+    st.session_state.pop("screenshot_preview", None)
+    st.rerun()
+    return True

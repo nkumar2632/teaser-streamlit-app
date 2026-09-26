@@ -16,7 +16,8 @@ from teaser_app.market_data import LocalHistory
 from teaser_app.live_history import record_reported_placements
 from teaser_app.market_compare_page import render_market_comparison
 from teaser_app.nfl_market import execution_status
-from teaser_app.nfl_market_page import render_saved_nfl_market
+from teaser_app.nfl_market_page import ensure_active_restored, render_nfl_workflow, render_saved_nfl_market
+from teaser_app.nfl_workflow import activate_proposal, active_proposal, release_active
 from teaser_app.presentation import card as html_card, h, percent, signed
 from teaser_app.screenshot_import import render_screenshot_import
 from teaser_app.results_page import render_results
@@ -55,6 +56,9 @@ adapter: TeaserModelAdapter = st.session_state.adapter
 slate: dict = st.session_state.slate
 
 mode = st.radio("League and model track", ("NFL · LIVE", "CFB · PAPER"), horizontal=True)
+if mode == "NFL · LIVE":
+    ensure_active_restored(adapter)
+    slate = st.session_state.slate
 render_url_import("CFB" if mode == "CFB · PAPER" else "NFL")
 render_screenshot_import()
 render_results(adapter)
@@ -122,6 +126,8 @@ def render_exposure(view) -> None:
 
 st.title("NFL Teaser v1.0")
 st.caption(f"{NFL_TEASER.league} | {NFL_TEASER.bet_type} | {NFL_TEASER.model_version} | {NFL_TEASER.status} · local manual workspace · no bets are placed by this app")
+render_nfl_workflow(adapter)
+slate = st.session_state.slate
 
 
 view = st.session_state.get("card")
@@ -213,6 +219,17 @@ else:
             if recheck_view.rebuilt_card:
                 st.warning("Source model rebuilt a new proposal after a discard. It is pending its own recheck.")
                 if st.button("Adopt rebuilt proposal", disabled=current_fp != recheck_fp, use_container_width=True):
+                    try:
+                        if current_context and current_context.get("confirmed_execution"):
+                            activate_proposal(LocalHistory(), recheck_view.rebuilt_card, slate, current_context,
+                                              now=datetime.now(ZoneInfo("America/Detroit")), replace=True,
+                                              reason="adopted rebuilt proposal after discard")
+                        else:
+                            release_active(LocalHistory(), now=datetime.now(ZoneInfo("America/Detroit")),
+                                           reason="adopted a non-executable rebuilt proposal")
+                    except (ValueError, OSError) as exc:
+                        show_error(exc)
+                        st.stop()
                     st.session_state.card = recheck_view.rebuilt_card
                     st.session_state.card_slate = deepcopy(slate)
                     st.session_state.built_fingerprint = current_fp
@@ -304,9 +321,17 @@ with st.expander("Slate input · season, book, prices", expanded=not bool(slate[
         st.session_state.revision += 1
         st.rerun()
 
-if st.button("Build proposal from entered slate", type="primary", use_container_width=True):
+manual_replaces = active_proposal(LocalHistory()) is not None
+manual_ok = True
+if manual_replaces:
+    st.warning("An active proposal baseline exists. Building from entered sides would replace it.")
+    manual_ok = st.checkbox("Replace the active proposal baseline", key="nfl_manual_replace_active")
+if st.button("Build proposal from entered slate", type="primary", use_container_width=True, disabled=not manual_ok):
     try:
         view = adapter.grade(slate, historical=st.session_state.origin == "historical")
+        if manual_replaces:
+            release_active(LocalHistory(), now=datetime.now(ZoneInfo("America/Detroit")),
+                           reason="replaced by a manually entered proposal")
         if st.session_state.origin != "historical":
             LocalHistory().ingest_snapshot(slate)
     except (ValueError, RuntimeError, OSError) as exc:

@@ -640,3 +640,19 @@ def test_ambiguous_or_unreadable_cfb_cells_are_left_blank_not_guessed():
     row = preview.candidates[0]
     assert (row["spread_away"], row["spread_home"], row["total"]) == (None, None, "44")
     assert any("could not be placed" in warning and "+10 -110" in warning for warning in preview.warnings)
+
+
+def test_reconfirming_the_same_capture_reuses_one_snapshot(tmp_path):
+    history = LocalHistory(tmp_path)
+    texts = [[("JAX 2026-09-27T13:00:00-04:00 +2.5 -110", .99), ("DEN 2026-09-27T13:00:00-04:00 -2.5 -110", .99)]]
+    files = checked_files(1)
+    first = extract_screenshots(files, "NFL", "My Book", CAPTURED, FixtureExtractor(list(texts)))
+    second = extract_screenshots(files, "NFL", "My Book", CAPTURED, FixtureExtractor(list(texts)))
+    assert first.extracted_at != second.extracted_at or first is not second
+    saved_first = save_confirmed_execution(first, [dict(row) for row in first.candidates], {"2": "", "3": ""}, history)
+    saved_again = save_confirmed_execution(second, [dict(row) for row in second.candidates], {"2": "", "3": ""}, history)
+    assert saved_again["snapshot_id"] == saved_first["snapshot_id"]
+    assert len(history.market_history(league="NFL", role="EXECUTION")) == 1
+    changed = [dict(row) for row in second.candidates]
+    changed[0]["spread_away"], changed[0]["spread_home"] = "+3", "-3"
+    assert save_confirmed_execution(second, changed, {"2": "", "3": ""}, history)["snapshot_id"] != saved_first["snapshot_id"]

@@ -857,6 +857,23 @@ def normalize_screenshot_review(preview: ScreenshotPreview, edited_rows: list[di
     return payload
 
 
+def _capture_key(payload: dict) -> tuple:
+    """What was captured and confirmed, without extraction-run metadata (times, warnings)."""
+    events = sorted((tuple(str(event.get(field) or "") for field in ("away_team", "home_team", "kickoff",
+                                                                     *MARKET_FIELDS))
+                     for event in payload.get("events", [])))
+    hashes = sorted(image.get("sha256", "") for image in payload.get("screenshot_provenance", []))
+    menu = (payload.get("teaser_prices") or {}).get("6_point") or {}
+    return (payload.get("league"), payload.get("sportsbook"), payload.get("captured_at"),
+            tuple(hashes), tuple(events), menu.get("2_team"), menu.get("3_team"))
+
+
 def save_confirmed_execution(preview: ScreenshotPreview, edited_rows: list[dict],
                              teaser_prices: dict, history) -> dict:
-    return history.save_confirmed_execution(normalize_screenshot_review(preview, edited_rows, teaser_prices))
+    """Save once per confirmed capture: re-confirming the same screenshots and values reuses it."""
+    payload = normalize_screenshot_review(preview, edited_rows, teaser_prices)
+    key = _capture_key(payload)
+    for existing in history.market_history(league=payload["league"], role="EXECUTION"):
+        if existing.get("source_type") == "screenshot" and _capture_key(existing) == key:
+            return existing
+    return history.save_confirmed_execution(payload)
