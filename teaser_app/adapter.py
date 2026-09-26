@@ -288,11 +288,18 @@ class TeaserModelAdapter:
             exposure=MappingProxyType(dict(card.exposure)), research=research_rows,
         )
 
-    def grade(self, slate: dict, *, historical: bool = False) -> CardView:
+    def grade(self, slate: dict, *, historical: bool = False, graded_at: str | None = None) -> CardView:
+        """Grade a slate now, or re-create a saved proposal at its original grading time."""
         if slate.get("league", "NFL") != "NFL":
             raise ValueError("NFL live grading requires an NFL slate")
         market, prices = self._snapshots(slate)
-        card = grade_week(market, prices)
+        if graded_at is None:
+            card = grade_week(market, prices)
+        else:
+            when = datetime.fromisoformat(str(graded_at).replace("Z", "+00:00"))
+            if when.utcoffset() is None:
+                raise ValueError("saved grading time needs a UTC offset")
+            card = grade_week(market, prices, graded_at=when.astimezone(timezone.utc))
         return self._view(card, market, prices, historical)
 
     def grade_cfb_paper(self, slate: dict, *, historical: bool = False) -> PaperView:

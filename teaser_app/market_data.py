@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -57,7 +58,8 @@ def _save(folder: Path, prefix: str, record: dict) -> dict:
     record_id = _identity(prefix, record)
     field = {"mkt": "snapshot_id", "run": "run_id", "res": "result_id",
              "rst": "result_snapshot_id", "plc": "placement_id",
-             "stl": "settlement_id", "mnu": "verification_id"}[prefix]
+             "stl": "settlement_id", "mnu": "verification_id",
+             "prp": "proposal_id", "act": "activation_id"}[prefix]
     saved = json.loads(_canonical({field: record_id, **record}))
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{record_id}.json"
@@ -116,8 +118,9 @@ def normalize_market(slate: dict) -> dict:
 
 
 class LocalHistory:
-    def __init__(self, root: Path = ROOT) -> None:
-        self.root = root
+    def __init__(self, root: Path | None = None) -> None:
+        # TEASER_DATA_DIR lets tests (and only tests, by default) keep away from real local data.
+        self.root = root if root is not None else Path(os.environ.get("TEASER_DATA_DIR") or ROOT)
 
     def ingest_snapshot(self, slate: dict) -> dict:
         payload = normalize_market(slate)
@@ -164,6 +167,23 @@ class LocalHistory:
             "prices": dict(prices), "observed_at": when.isoformat(),
             "source_reference": f"operator verified unchanged; parent market {snapshot_id}",
         })
+
+    def save_proposal(self, record: dict) -> dict:
+        """Immutable NFL proposal baseline (card inputs and grading time), never a placement."""
+        return _save(self.root / "proposals", "prp", record)
+
+    def get_proposal(self, proposal_id: str) -> dict:
+        return _read(self.root / "proposals", proposal_id)
+
+    def save_activation(self, record: dict) -> dict:
+        """Append-only log entry that makes a proposal the active baseline, or releases it."""
+        return _save(self.root / "proposals", "act", record)
+
+    def activations(self) -> list[dict]:
+        folder = self.root / "proposals"
+        records = [json.loads(path.read_text(encoding="utf-8")) for path in folder.glob("act_*.json")]
+        return sorted(records, key=lambda record: (datetime.fromisoformat(record["at"]).timestamp(),
+                                                   record["sequence"], record["activation_id"]))
 
     def get_snapshot(self, snapshot_id: str) -> dict:
         return _read(self.root / "normalized", snapshot_id)
