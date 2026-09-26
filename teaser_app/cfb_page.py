@@ -14,7 +14,8 @@ from teaser_app.inputs import decode_slate, encode_slate, slate_fingerprint
 from teaser_app.market_data import LocalHistory
 from teaser_app.paper_history import paper_performance, run_record
 from teaser_app.presentation import card as html_card, h, percent, signed
-from teaser_app.public_cfb import DEFAULT_TEASER_BOOK, build_cfb_public_board, prepare_cfb_reference
+from teaser_app.public_cfb import (DEFAULT_TEASER_BOOK, build_cfb_public_board, cfb_source_kind,
+                                   infer_cfb_week, prepare_cfb_reference)
 from teaser_app.strategy import CFB_TEASER
 
 
@@ -139,22 +140,30 @@ def _render_board(view, history, adapter, slate: dict) -> None:
 
 
 def _render_public_source(history, adapter) -> None:
-    snapshots = [record for record in reversed(history.market_history(league="CFB", role="REFERENCE"))
-                 if record.get("source_type") == "url"]
+    snapshots = [record for record in reversed(history.market_history(league="CFB"))
+                 if cfb_source_kind(record)]
     st.subheader("Public CFB lines")
-    st.caption("Fetch and confirm ESPN CFB lines in Public Lines above, then select that saved slate here. Manual sides are not needed.")
+    st.caption("Fetch and confirm ESPN CFB lines in Public Lines above, or confirm a CFB sportsbook "
+               "screenshot import, then select that saved slate here. Manual sides are not needed. "
+               "CFB is PAPER only for the 2026 season, whatever the line source.")
     if not snapshots:
-        st.info("No confirmed public CFB slate is saved yet. Fetch and review one above.")
+        st.info("No confirmed CFB slate is saved yet. Fetch and review one above.")
         return
     by_id = {record["snapshot_id"]: record for record in snapshots}
     chosen_id = st.selectbox("Saved public CFB slate", tuple(by_id),
                              format_func=lambda key: (
-                                 f"{by_id[key]['captured_at']} · {by_id[key].get('source_provider') or 'ESPN'} · "
+                                 f"{by_id[key]['captured_at']} · "
+                                 f"{'screenshot' if cfb_source_kind(by_id[key]) == 'screenshot' else by_id[key].get('source_provider') or 'ESPN'} · "
                                  f"{by_id[key].get('sportsbook') or 'reference market'} · {key}"),
                              key="cfb_public_choice")
     snapshot = by_id[chosen_id]
+    kind = cfb_source_kind(snapshot)
     season = snapshot.get("season")
     week = snapshot.get("week")
+    if type(season) is not int or type(week) is not int:
+        inferred_season, inferred_week = infer_cfb_week(history, snapshot)
+        season = season if type(season) is int else inferred_season
+        week = week if type(week) is int else inferred_week
     if type(season) is not int or not 2000 <= season <= 2100:
         season = int(st.number_input("CFB season for public slate", min_value=2000, max_value=2100,
                                      value=datetime.now(ZoneInfo("America/Detroit")).year,
@@ -169,7 +178,8 @@ def _render_public_source(history, adapter) -> None:
         st.error(str(exc))
         return
     with st.expander(f"Review saved public slate · {len(preview.included)} usable / {len(preview.excluded)} excluded"):
-        st.caption(f"REFERENCE · {snapshot.get('source_url') or 'ESPN'} · captured {snapshot['captured_at']}")
+        st.caption(f"{'EXECUTION screenshot (PAPER use only)' if kind == 'screenshot' else 'REFERENCE'} · "
+                   f"{snapshot.get('source_url') or snapshot.get('sportsbook') or 'ESPN'} · captured {snapshot['captured_at']}")
         for game in preview.included:
             st.caption(f"{game['game']} · home {signed(game['sides'][1]['spread'])} · "
                        f"total {game['sides'][0]['total']} · {game['kickoff']}")
@@ -194,7 +204,8 @@ def _render_public_source(history, adapter) -> None:
         menu_book = st.text_input("Teaser menu sportsbook setting", value=menu_book,
                                   key="cfb_menu_book_setting").strip()
         st.session_state.cfb_menu_book = menu_book
-    st.caption(f"Selected REFERENCE slate · Lines: {preview.lines_label} · Teaser pricing: {menu_book} · PAPER")
+    st.caption(f"Selected {'screenshot' if kind == 'screenshot' else 'REFERENCE'} slate · "
+               f"Lines: {preview.lines_label} · Teaser pricing: {menu_book} · PAPER")
     prices = dict(slate["prices"])
     for size in ("2", "3"):
         if prices[size]:
@@ -206,7 +217,9 @@ def _render_public_source(history, adapter) -> None:
                                          key=f"cfb_public_menu_{size}_{chosen_id}").strip()
     st.session_state.cfb_public_prices = prices
     st.caption("You can build without a teaser price. That ticket size will show EV unavailable; no manual quoted sides are needed.")
-    if st.button("Build PAPER card from public slate", type="primary", use_container_width=True):
+    build_label = ("Build PAPER card from screenshot slate" if kind == "screenshot"
+                   else "Build PAPER card from public slate")
+    if st.button(build_label, type="primary", use_container_width=True):
         try:
             paper, prepared, _ = build_cfb_public_board(
                 history, adapter, snapshot, now=datetime.now(ZoneInfo("America/Detroit")),

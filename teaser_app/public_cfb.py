@@ -7,10 +7,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from unicodedata import normalize
+from zoneinfo import ZoneInfo
 
 from teaser_app.market_data import _canonical, snapshot_role
 
 DEFAULT_TEASER_BOOK = "bluecoins.ag"
+BOARD_ZONE = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -40,14 +42,49 @@ def _missing(value: object) -> bool:
     return value is None or str(value).strip() == ""
 
 
+def cfb_source_kind(snapshot: dict) -> str | None:
+    """"public" for a confirmed ESPN REFERENCE slate, "screenshot" for a confirmed sportsbook
+    screenshot slate. Either one feeds only the CFB PAPER track."""
+    if snapshot.get("league") != "CFB" or not snapshot.get("snapshot_id"):
+        return None
+    if snapshot_role(snapshot) == "REFERENCE" and snapshot.get("source_type") == "url":
+        return "public"
+    if (snapshot_role(snapshot) == "EXECUTION" and snapshot.get("source_type") == "screenshot"
+            and snapshot.get("schema_version") == 3):
+        return "screenshot"
+    return None
+
+
+def infer_cfb_week(history, snapshot: dict) -> tuple[int | None, int | None]:
+    """Season and week from a saved ESPN CFB slate covering the same kickoff dates; never guessed."""
+    dates = set()
+    for event in snapshot.get("events", []):
+        try:
+            dates.add(_aware(event.get("kickoff"), "kickoff").astimezone(BOARD_ZONE).date())
+        except ValueError:
+            continue
+    weeks = set()
+    for record in history.market_history(league="CFB", role="REFERENCE"):
+        if record.get("source_type") != "url" or type(record.get("week")) is not int:
+            continue
+        for event in record.get("events", []):
+            try:
+                day = _aware(event.get("kickoff"), "kickoff").astimezone(BOARD_ZONE).date()
+            except ValueError:
+                continue
+            if day in dates and type(record.get("season")) is int:
+                weeks.add((record["season"], record["week"]))
+    return next(iter(weeks)) if len(weeks) == 1 else (None, None)
+
+
 def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
                           season: int | None = None, week: int | None = None,
                           prices: dict[str, str] | None = None,
                           menu_book: str = DEFAULT_TEASER_BOOK) -> PreparedCFB:
     """Exclude bad games individually; never change the confirmed source snapshot."""
-    if (snapshot.get("league") != "CFB" or snapshot_role(snapshot) != "REFERENCE"
-            or snapshot.get("source_type") != "url" or not snapshot.get("snapshot_id")):
-        raise ValueError("Choose a confirmed public CFB market snapshot")
+    kind = cfb_source_kind(snapshot)
+    if kind is None:
+        raise ValueError("Choose a confirmed public or screenshot CFB market snapshot")
     current = _aware(now.isoformat(), "current time")
     captured = _aware(snapshot.get("captured_at"), "snapshot capture time")
     if captured > current:
@@ -61,12 +98,17 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
     menu_book = _name(menu_book)
     if not menu_book or len(menu_book) > 60:
         raise ValueError("Choose a teaser-menu sportsbook")
+    if prices is None and kind == "screenshot":
+        menu = (snapshot.get("teaser_prices") or {}).get("6_point") or {}
+        prices = {"2": menu.get("2_team") or "", "3": menu.get("3_team") or ""}
     offered = prices or {"2": "", "3": ""}
     if not isinstance(offered, dict) or set(offered) != {"2", "3"}:
         raise ValueError("Teaser menu needs 2-team and 3-team fields")
-    provider = _name(snapshot.get("source_provider") or "ESPN")
     line_book = _name(snapshot.get("sportsbook") or "reference market")
-    lines_label = f"{provider}/{line_book}"
+    if kind == "screenshot":
+        lines_label = f"{line_book} screenshot"
+    else:
+        lines_label = f"{_name(snapshot.get('source_provider') or 'ESPN')}/{line_book}"
     candidates, excluded = {}, []
     conflicts = set()
     for event in snapshot.get("events", []):
@@ -126,7 +168,8 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
                              "detail": "team appears in multiple games"})
         else:
             included.append(game)
-    slate = {"schema_version": 2, "league": "CFB", "source": "reference_source",
+    slate = {"schema_version": 2, "league": "CFB",
+             "source": "user_screenshot" if kind == "screenshot" else "reference_source",
              "line_label": "current_pregame", "season": season, "week": week,
              "sportsbook": line_book, "captured_at": captured.isoformat(),
              "prices": {key: str(offered[key] or "").strip() for key in ("2", "3")},
