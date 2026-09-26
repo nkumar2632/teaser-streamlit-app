@@ -10,6 +10,7 @@ import streamlit as st
 
 from teaser_app.market_data import LocalHistory
 from teaser_app.screenshot_ingest import (
+    DEFAULT_TEASER_MENU,
     AppleVisionExtractor,
     ManualTextExtractor,
     MARKET_FIELDS,
@@ -18,6 +19,8 @@ from teaser_app.screenshot_ingest import (
     ScreenshotPreview,
     extract_screenshots,
     known_cfb_teams,
+    normalize_screenshot_review,
+    teaser_price_source,
     reparse_review_text,
     save_confirmed_execution,
     validate_uploads,
@@ -113,7 +116,11 @@ def render_screenshot_import() -> None:
 
         saved = st.session_state.get("screenshot_saved_snapshot")
         if saved:
-            st.success(f"Saved immutable EXECUTION snapshot {saved['snapshot_id']} · {saved['league']} · {saved['sportsbook']}. No betting card or placement record was changed.")
+            excluded = saved.get("excluded_review_rows") or []
+            st.success(f"Saved immutable EXECUTION snapshot {saved['snapshot_id']} · {saved['league']} · {saved['sportsbook']} · "
+                       f"{len(saved['events'])} usable / {len(excluded)} excluded. No betting card or placement record was changed.")
+            for item in excluded:
+                st.caption(f"Excluded · {item['game']} · {item['reason']}")
 
         preview = st.session_state.get("screenshot_preview")
         if preview is None:
@@ -160,20 +167,36 @@ def render_screenshot_import() -> None:
 
         two, three = st.columns(2)
         price_key = preview.files[0].sha256[:16] + preview.extracted_at
+        # Without a teaser menu on the screenshot, the standard menu is prefilled as a default only.
         with two:
             price_two = st.text_input("2-team 6-point teaser price",
-                                      value=preview.teaser_prices.get("2") or "",
+                                      value=preview.teaser_prices.get("2") or DEFAULT_TEASER_MENU["2"],
                                       key=f"screenshot_teaser_2_{price_key}")
         with three:
             price_three = st.text_input("3-team 6-point teaser price",
-                                        value=preview.teaser_prices.get("3") or "",
+                                        value=preview.teaser_prices.get("3") or DEFAULT_TEASER_MENU["3"],
                                         key=f"screenshot_teaser_3_{price_key}")
+        labels = {"screenshot": "read from the screenshot", "operator": "entered by you",
+                  "default": "standard default · not an observed or verified quote"}
+        st.caption(" · ".join(f"{size}-team: {labels[source]}" for size, value in (("2", price_two), ("3", price_three))
+                              if (source := teaser_price_source(preview, size, value))))
         if any(state in {"uncertain", "conflict"} for state in preview.teaser_states.values()):
             st.warning("Teaser pricing was uncertain or conflicting. Confirm only the standard 6-point football teaser; leave unrelated products blank.")
 
         rows = [row for row in edited_records if any(str(row.get(field) or "").strip()
                                                      for field in REVIEW_FIELDS)]
         prices = {"2": price_two, "3": price_three}
+        if preview.league == "CFB" and rows:
+            try:
+                planned = normalize_screenshot_review(preview, rows, prices)
+            except ScreenshotIngestError as exc:
+                st.error(f"Nothing can be saved yet: {exc}")
+            else:
+                excluded = planned.get("excluded_review_rows") or []
+                st.info(f"CFB PAPER · {len(planned['events'])} usable / {len(excluded)} excluded. Excluded games "
+                        "are not saved and nothing is guessed; fix a row above to include it.")
+                for item in excluded:
+                    st.warning(f"Excluded · {item['game']} · {item['reason']}")
         if preview.league == "NFL" and _render_nfl_actions(preview, rows, prices):
             return
         if st.button("Confirm EXECUTION Snapshot", type="primary" if preview.league != "NFL" else "secondary",

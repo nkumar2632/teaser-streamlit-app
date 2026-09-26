@@ -181,8 +181,10 @@ def _render_public_source(history, adapter) -> None:
         st.caption(f"{'EXECUTION screenshot (PAPER use only)' if kind == 'screenshot' else 'REFERENCE'} · "
                    f"{snapshot.get('source_url') or snapshot.get('sportsbook') or 'ESPN'} · captured {snapshot['captured_at']}")
         for game in preview.included:
-            st.caption(f"{game['game']} · home {signed(game['sides'][1]['spread'])} · "
-                       f"total {game['sides'][0]['total']} · {game['kickoff']}")
+            sides = " · ".join(f"{side['team']} {signed(side['spread'])}" for side in game["sides"])
+            partial = " · one side shown on the screenshot" if len(game["sides"]) == 1 else ""
+            st.caption(f"{game['game']} · {sides} · total {game['sides'][0]['total']} · "
+                       f"{game['kickoff']}{partial}")
         for game in preview.excluded:
             st.warning(f"{game['game']}: {game['reason']} · {game['detail']}")
     if st.button("Use this slate for proposal", disabled=not preview.included,
@@ -207,8 +209,12 @@ def _render_public_source(history, adapter) -> None:
     st.caption(f"Selected {'screenshot' if kind == 'screenshot' else 'REFERENCE'} slate · "
                f"Lines: {preview.lines_label} · Teaser pricing: {menu_book} · PAPER")
     prices = dict(slate["prices"])
+    sources = snapshot.get("teaser_price_sources") or {}
     for size in ("2", "3"):
-        if prices[size]:
+        if prices[size] and sources.get(f"{size}_team") == "default":
+            st.caption(f"{size}-team 6-point teaser price: {prices[size]} · standard default menu, "
+                       "not an observed or verified quote")
+        elif prices[size]:
             st.caption(f"{size}-team 6-point teaser price: {prices[size]} · saved for this slate")
         else:
             prices[size] = st.text_input(f"Missing {size}-team 6-point teaser price · optional",

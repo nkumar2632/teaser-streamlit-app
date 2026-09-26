@@ -84,6 +84,13 @@ def _stored_prices(snapshot: dict) -> dict[str, str]:
     return result
 
 
+def _default_prices(snapshot: dict) -> set[str]:
+    """Sizes whose confirmed price was the prefilled standard menu, never an observed quote."""
+    sources = snapshot.get("teaser_price_sources") or {}
+    return {size for size in ("2", "3")
+            if isinstance(sources, dict) and sources.get(f"{size}_team") == "default"}
+
+
 def _confirmed_execution(snapshot: dict) -> bool:
     return (snapshot_role(snapshot) == "EXECUTION" and
             snapshot.get("source_type") == "screenshot" and
@@ -129,9 +136,11 @@ def prepare_nfl_snapshot(snapshot: dict, adapter, *, now: datetime,
                 verification.get("book") == menu_book and
                 verification.get("prices") == offered)
     verified_at = _aware(verification["observed_at"], "menu verification") if verified else None
+    defaults = _default_prices(snapshot)
     observed = {size: (verified_at.isoformat() if offered[size] and verified_at else
                        captured.isoformat() if stored[size] and _confirmed_execution(snapshot)
-                       and menu_book.casefold() == line_book.casefold() else None)
+                       and menu_book.casefold() == line_book.casefold() and size not in defaults
+                       else None)
                 for size in ("2", "3")}
 
     candidates, excluded, conflicts = {}, [], set()

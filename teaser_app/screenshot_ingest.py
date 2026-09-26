@@ -766,65 +766,101 @@ def _checked(value, field: str) -> str | None:
     return text
 
 
+# Standard Bluecoins 6-point menu, prefilled when the screenshot shows no teaser menu. A default
+# is never an observed quote: it is saved with source "default" and must be verified before use.
+DEFAULT_TEASER_MENU = {"2": "-110", "3": "+170"}
+
+
+def teaser_price_source(preview: ScreenshotPreview, size: str, value) -> str | None:
+    """Where a confirmed teaser price came from: the screenshot, the prefilled default, or the operator."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    extracted = preview.teaser_prices.get(size)
+    if extracted and text == extracted:
+        return "screenshot"
+    if not extracted and text == DEFAULT_TEASER_MENU[size]:
+        return "default"
+    return "operator"
+
+
+def _review_row(preview: ScreenshotPreview, edited: dict, original: dict | None, position: int) -> dict:
+    away, home = (str(edited.get(field) or "").strip() for field in ("away_team", "home_team"))
+    if not away or not home or away.casefold() == home.casefold() or len(away) > 80 or len(home) > 80:
+        raise ScreenshotIngestError(f"Row {position} needs distinct away and home teams")
+    kickoff = str(edited.get("kickoff") or "").strip()
+    try:
+        instant = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+        if instant.utcoffset() is None:
+            raise ValueError
+    except ValueError as exc:
+        raise ScreenshotIngestError(f"Row {position} kickoff requires an ISO timestamp with UTC offset") from exc
+    record = {field: None for field in FIELDS}
+    record.update(event_id=_identity("evt", {"league": preview.league, "away": away,
+                                               "home": home, "kickoff": instant.isoformat()}),
+                  league=preview.league, away_team=away, home_team=home,
+                  kickoff=instant.isoformat(), captured_at=preview.captured_at,
+                  source="user_screenshot", sportsbook=preview.sportsbook,
+                  source_type="screenshot", source_provider=preview.extractor,
+                  source_url=None, market_role="EXECUTION")
+    for field in MARKET_FIELDS:
+        record[field] = _checked(edited.get(field), field)
+        if original and original.get("field_states", {}).get(field) == "conflict" and record[field] is None:
+            raise ScreenshotIngestError(f"Resolve conflicting {field.replace('_', ' ')} in row {position}")
+    if record["spread_away"] is not None and record["spread_home"] is not None:
+        if Decimal(record["spread_away"]) + Decimal(record["spread_home"]) != 0:
+            raise ScreenshotIngestError(
+                f"Row {position} has opposing spreads that do not pair; correct or clear one side")
+    changes = {}
+    if original:
+        for field in REVIEW_FIELDS:
+            if str(original.get(field) or "") != str(record.get(field, edited.get(field)) or ""):
+                changes[field] = {"extracted": original.get(field),
+                                  "confirmed": record.get(field, edited.get(field))}
+    record["review_changes"] = changes
+    record["field_extraction_state"] = original.get("field_states", {}) if original else {
+        field: "manual" for field in REVIEW_FIELDS}
+    record["source_screenshot_hashes"] = sorted({value for values in
+        (original.get("field_sources", {}) if original else {}).values() for value in values})
+    return record
+
+
 def normalize_screenshot_review(preview: ScreenshotPreview, edited_rows: list[dict],
-                                teaser_prices: dict) -> dict:
+                                teaser_prices: dict, *, exclude_invalid_rows: bool | None = None) -> dict:
+    """Validate reviewed rows into an EXECUTION snapshot.
+
+    NFL (LIVE) rejects the whole confirmation on the first invalid row. CFB (PAPER only) excludes
+    each invalid row with its reason and saves the rest; nothing is guessed to rescue a row."""
+    exclude = preview.league == "CFB" if exclude_invalid_rows is None else exclude_invalid_rows
     if not edited_rows:
         raise ScreenshotIngestError("Add at least one reviewed market row")
     if len(edited_rows) > 100:
         raise ScreenshotIngestError("Review has too many market rows")
-    events, seen, teams_at_time = [], set(), set()
+    events, excluded, seen, teams_at_time = [], [], set(), set()
     originals = {row["candidate_id"]: row for row in preview.candidates}
     for position, edited in enumerate(edited_rows, start=1):
-        candidate_id = edited.get("candidate_id")
-        original = originals.get(candidate_id)
-        away, home = (str(edited.get(field) or "").strip() for field in ("away_team", "home_team"))
-        if not away or not home or away.casefold() == home.casefold() or len(away) > 80 or len(home) > 80:
-            raise ScreenshotIngestError(f"Row {position} needs distinct away and home teams")
-        kickoff = str(edited.get("kickoff") or "").strip()
         try:
-            instant = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
-            if instant.utcoffset() is None:
-                raise ValueError
-        except ValueError as exc:
-            raise ScreenshotIngestError(f"Row {position} kickoff requires an ISO timestamp with UTC offset") from exc
-        identity = (team_key(preview.league, away) or away.casefold(),
-                    team_key(preview.league, home) or home.casefold(), instant.isoformat())
-        if identity in seen:
-            raise ScreenshotIngestError("Duplicate reviewed event")
-        seen.add(identity)
-        for team in identity[:2]:
-            team_time = (team, identity[2])
-            if team_time in teams_at_time:
+            record = _review_row(preview, edited, originals.get(edited.get("candidate_id")), position)
+            identity = (team_key(preview.league, record["away_team"]) or record["away_team"].casefold(),
+                        team_key(preview.league, record["home_team"]) or record["home_team"].casefold(),
+                        record["kickoff"])
+            if identity in seen:
+                raise ScreenshotIngestError("Duplicate reviewed event")
+            if any((team, identity[2]) in teams_at_time for team in identity[:2]):
                 raise ScreenshotIngestError(f"Row {position} repeats a team at the same kickoff")
-            teams_at_time.add(team_time)
-        record = {field: None for field in FIELDS}
-        record.update(event_id=_identity("evt", {"league": preview.league, "away": away,
-                                                   "home": home, "kickoff": instant.isoformat()}),
-                      league=preview.league, away_team=away, home_team=home,
-                      kickoff=instant.isoformat(), captured_at=preview.captured_at,
-                      source="user_screenshot", sportsbook=preview.sportsbook,
-                      source_type="screenshot", source_provider=preview.extractor,
-                      source_url=None, market_role="EXECUTION")
-        for field in MARKET_FIELDS:
-            record[field] = _checked(edited.get(field), field)
-            if original and original.get("field_states", {}).get(field) == "conflict" and record[field] is None:
-                raise ScreenshotIngestError(f"Resolve conflicting {field.replace('_', ' ')} in row {position}")
-        if record["spread_away"] is not None and record["spread_home"] is not None:
-            if Decimal(record["spread_away"]) + Decimal(record["spread_home"]) != 0:
-                raise ScreenshotIngestError(
-                    f"Row {position} has opposing spreads that do not pair; correct or clear one side")
-        changes = {}
-        if original:
-            for field in REVIEW_FIELDS:
-                if str(original.get(field) or "") != str(record.get(field, edited.get(field)) or ""):
-                    changes[field] = {"extracted": original.get(field),
-                                      "confirmed": record.get(field, edited.get(field))}
-        record["review_changes"] = changes
-        record["field_extraction_state"] = original.get("field_states", {}) if original else {
-            field: "manual" for field in REVIEW_FIELDS}
-        record["source_screenshot_hashes"] = sorted({value for values in
-            (original.get("field_sources", {}) if original else {}).values() for value in values})
+        except ScreenshotIngestError as exc:
+            if not exclude:
+                raise
+            away = str(edited.get("away_team") or "").strip() or "?"
+            home = str(edited.get("home_team") or "").strip() or "?"
+            excluded.append({"row": position, "game": f"{away} at {home}", "reason": str(exc)})
+            continue
+        seen.add(identity)
+        teams_at_time.update((team, identity[2]) for team in identity[:2])
         events.append(record)
+    if not events:
+        raise ScreenshotIngestError(f"No usable reviewed rows remain ({len(excluded)} excluded); "
+                                    "correct at least one row")
     prices = {size: _checked(teaser_prices.get(size), f"teaser_{size}team_6pt_price")
               for size in ("2", "3")}
     payload = {
@@ -847,7 +883,11 @@ def normalize_screenshot_review(preview: ScreenshotPreview, edited_rows: list[di
         "screenshot_count": len(preview.files), "extracted_at": preview.extracted_at,
         "extractor": preview.extractor, "extraction_warnings": list(preview.warnings),
         "raw_screenshots_retained": False,
+        "teaser_price_sources": {f"{size}_team": teaser_price_source(preview, size, prices[size])
+                                 for size in ("2", "3")},
     }
+    if excluded:
+        payload["excluded_review_rows"] = excluded
     for event in events:
         event["teaser_2team_6pt_price"] = prices["2"]
         event["teaser_3team_6pt_price"] = prices["3"]

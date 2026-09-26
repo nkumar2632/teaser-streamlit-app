@@ -16,10 +16,9 @@ from teaser_app.market_data import snapshot_role
 from teaser_app.nfl_market import (UNKNOWN_BOOK, _aware, _confirmed_execution, _stored_prices,
                                    execution_book, prepare_nfl_snapshot)
 
+from teaser_app.screenshot_ingest import DEFAULT_TEASER_MENU  # noqa: E402  (defaults, never a quote)
+
 DEFAULT_MENU_BOOK = "bluecoins.ag"
-# Standard Bluecoins 6-point menu. These are defaults for pricing a proposal, never an observed
-# or fresh quote: the execution gate still requires an explicit current verification.
-DEFAULT_TEASER_MENU = {"2": "-110", "3": "+170"}
 BOARD_ZONE = ZoneInfo("America/New_York")
 
 

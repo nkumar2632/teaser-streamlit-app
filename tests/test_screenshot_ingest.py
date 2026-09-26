@@ -282,11 +282,11 @@ def test_streamlit_confirm_button_is_the_only_ui_persistence_gate(tmp_path, monk
     assert not app.exception
 
 
-def test_confirmation_rejects_malformed_values_duplicate_events_and_reference_payload(tmp_path):
+def test_nfl_confirmation_rejects_malformed_values_duplicate_events_and_reference_payload(tmp_path):
     files = checked_files()
     preview = extract_screenshots(
-        files, "CFB", "My Book", CAPTURED,
-        FixtureExtractor([[("Texas +2.5 -110", .99), ("Tennessee -2.5 -110", .99)]]),
+        files, "NFL", "My Book", CAPTURED,
+        FixtureExtractor([[("JAX +2.5 -110", .99), ("DEN -2.5 -110", .99)]]),
     )
     rows = complete_rows(preview)
     rows[0]["moneyline_away"] = "EVEN"
@@ -299,6 +299,26 @@ def test_confirmation_rejects_malformed_values_duplicate_events_and_reference_pa
     with pytest.raises(ValueError, match="confirmed sportsbook"):
         history.save_confirmed_execution({"schema_version": 2, "market_role": "REFERENCE", "events": [{}]})
     assert history.market_history() == [] and history.runs(status="PAPER") == []
+
+
+def test_cfb_confirmation_excludes_malformed_or_duplicate_rows_instead_of_failing(tmp_path):
+    files = checked_files()
+    preview = extract_screenshots(
+        files, "CFB", "My Book", CAPTURED,
+        FixtureExtractor([[("Texas +2.5 -110", .99), ("Tennessee -2.5 -110", .99)]]),
+    )
+    rows = complete_rows(preview)
+    rows[0]["moneyline_away"] = "EVEN"
+    history = LocalHistory(tmp_path)
+    with pytest.raises(ScreenshotIngestError, match="No usable reviewed rows remain"):
+        save_confirmed_execution(preview, rows, {"2": "", "3": ""}, history)
+    assert history.market_history() == []
+    rows[0]["moneyline_away"] = "+120"
+    saved = save_confirmed_execution(preview, rows + [dict(rows[0])], {"2": "", "3": ""}, history)
+    assert len(saved["events"]) == 1
+    assert saved["excluded_review_rows"] == [
+        {"row": 2, "game": "Texas at Tennessee", "reason": "Duplicate reviewed event"}]
+    assert history.runs(status="PAPER") == []
 
 
 def _bluecoins_board(sha: str = "board") -> list[OCRLine]:

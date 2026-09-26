@@ -133,6 +133,7 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
             if _missing(event.get("total")):
                 excluded.append({"game": label, "reason": "MISSING_TOTAL", "detail": "game total missing"})
                 continue
+            seen = (not _missing(away_spread), not _missing(home_spread))
             if _missing(home_spread):
                 home_spread = str(-Decimal(str(away_spread)))
             sides = adapter.cfb_public_sides(
@@ -141,6 +142,9 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
                 away_spread=str(away_spread) if not _missing(away_spread) else None,
                 total=str(event["total"]),
             )
+            if kind == "screenshot":
+                # Keep only the side(s) the screenshot showed; the other side is never invented.
+                sides = [side for side, shown in zip(sides, seen) if shown]
             identity = (away.casefold(), home.casefold(), kickoff.isoformat())
             if identity in conflicts:
                 excluded.append({"game": label, "reason": "CONFLICT", "detail": "duplicate game"})
