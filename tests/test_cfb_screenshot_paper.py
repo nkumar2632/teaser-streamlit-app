@@ -114,20 +114,24 @@ def test_streamlit_builds_cfb_paper_from_screenshot_slate_without_placement(tmp_
     import teaser_app.url_import as url_import
 
     history = LocalHistory(tmp_path)
-    _, kickoff = _screenshot_snapshot(history)
+    screenshot, kickoff = _screenshot_snapshot(history)
     _espn_week(history, kickoff)
     for module in (page, compare_page, results_page, url_import):
         monkeypatch.setattr(module, "LocalHistory", lambda: history)
     app = AppTest.from_file(APP, default_timeout=30).run()
     next(item for item in app.radio if item.label == "League and model track").set_value("CFB · PAPER").run()
-    chooser = next(item for item in app.selectbox if item.label == "Saved public CFB slate")
-    screenshot_id = next(key for key in chooser.options if "screenshot" in key)
-    chooser.set_value(screenshot_id).run()
-    next(item for item in app.button if item.label == "Use this slate for proposal").click().run()
-    next(item for item in app.button if item.label == "Build PAPER card from screenshot slate").click().run()
+    chooser = next(item for item in app.selectbox if item.label == "Saved CFB snapshot")  # Advanced
+    assert any("SPORTSBOOK SNAPSHOT — Bluecoins.ag" in option for option in chooser.options)
+    assert any("REFERENCE — ESPN" in option for option in chooser.options)
+    chooser.set_value(screenshot["snapshot_id"]).run()
+    assert any("SPORTSBOOK SNAPSHOT — Bluecoins.ag" in item.value for item in app.markdown)
+    next(item for item in app.button if item.label == "Build CFB PAPER card from this snapshot").click().run()
     assert not app.exception
     runs = history.runs(status="PAPER")
     assert len(runs) == 1 and runs[0]["lines_source"] == "bluecoins.ag screenshot"
+    assert runs[0]["menu_book"] == "bluecoins.ag"  # inherited from the screenshot's sportsbook
+    assert runs[0]["teaser_price_sources"] == {"2_team": "default", "3_team": "default"}
+    assert any("standard default menu, not observed" in item.value for item in app.caption)
     assert any("PAPER — NOT REAL MONEY" in item.value for item in app.warning)
     assert all("PLACE" not in item.label.upper() for item in app.button)
     assert history.live_placements() == []

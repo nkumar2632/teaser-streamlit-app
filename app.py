@@ -60,7 +60,7 @@ if mode == "NFL · LIVE":
     ensure_active_restored(adapter)
     slate = st.session_state.slate
 render_url_import("CFB" if mode == "CFB · PAPER" else "NFL")
-render_screenshot_import()
+render_screenshot_import("CFB" if mode == "CFB · PAPER" else "NFL")
 render_results(adapter)
 render_market_comparison("CFB" if mode == "CFB · PAPER" else "NFL")
 if mode == "CFB · PAPER":

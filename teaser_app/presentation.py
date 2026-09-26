@@ -40,3 +40,19 @@ def card(title: str, eyebrow: str, body: str, *, accent: str = "") -> str:
         f'<div class="teaser-body">{body}</div>'
         '</div>'
     )
+
+
+def book_name(book: object) -> str:
+    raw = str(book or "").strip()
+    return raw[:1].upper() + raw[1:]
+
+
+def source_label(snapshot: dict) -> str:
+    """Operator-facing name of a saved market snapshot's source."""
+    from teaser_app.market_data import snapshot_role
+
+    if snapshot.get("source_type") == "screenshot":
+        return f"SPORTSBOOK SNAPSHOT — {book_name(snapshot.get('sportsbook')) or 'unknown sportsbook'}"
+    if snapshot_role(snapshot) == "REFERENCE":
+        return f"REFERENCE — {snapshot.get('source_provider') or book_name(snapshot.get('sportsbook')) or 'ESPN'}"
+    return f"EXECUTION — {book_name(snapshot.get('sportsbook')) or 'unknown sportsbook'}"

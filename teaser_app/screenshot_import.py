@@ -27,6 +27,7 @@ from teaser_app.screenshot_ingest import (
 )
 
 DISPLAY_COLUMNS = ("candidate_id", *REVIEW_FIELDS, "review_status")
+DEFAULT_SPORTSBOOK = "bluecoins.ag"
 
 
 def _review_status(row: dict) -> str:
@@ -73,12 +74,26 @@ def _clear(*, include_table: bool = True) -> None:
         st.session_state.pop(key, None)
 
 
-def render_screenshot_import() -> None:
+def _after_confirm(snapshot: dict) -> None:
+    # The next import starts from a fresh capture time, never the one confirmed here.
+    st.session_state.pop("screenshot_captured_at", None)
+    if snapshot.get("league") == "CFB":
+        # A just-confirmed CFB screenshot replaces any previously selected CFB source.
+        st.session_state.cfb_select_snapshot_id = snapshot["snapshot_id"]
+
+
+def render_screenshot_import(mode_league: str = "NFL") -> None:
     with st.expander("Import my sportsbook screenshots"):
         st.caption("Images stay on this Mac. Review and confirmation are required before an immutable EXECUTION snapshot is saved; no wager is placed.")
-        sportsbook = st.text_input("Sportsbook", value="bluecoins.ag", key="screenshot_sportsbook",
-                                   placeholder="Enter the sportsbook shown")
-        league = st.selectbox("Screenshot league", ("NFL", "CFB"), key="screenshot_league")
+        with st.expander("Advanced · sportsbook and league override"):
+            sportsbook = st.text_input("Sportsbook override", value=DEFAULT_SPORTSBOOK, key="screenshot_sportsbook",
+                                       placeholder="Enter the sportsbook shown").strip()
+            # Keyed by mode: switching the league/track at the top always resets the override.
+            league = st.selectbox("Screenshot league override", ("NFL", "CFB"),
+                                  index=("NFL", "CFB").index(mode_league), key=f"screenshot_league_{mode_league}")
+        track = "LIVE" if league == "NFL" else "PAPER"
+        st.caption(f"League: {league} · {track}{' (overridden)' if league != mode_league else ' · follows the mode above'}"
+                   f" · Sportsbook: {sportsbook or '—'}")
         captured_at = st.text_input(
             "Lines captured at (ISO time with offset)",
             value=datetime.now(ZoneInfo("America/Detroit")).isoformat(timespec="seconds"),
@@ -208,6 +223,7 @@ def render_screenshot_import() -> None:
             else:
                 st.session_state.screenshot_saved_snapshot = result
                 st.session_state.pop("screenshot_preview", None)
+                _after_confirm(result)
                 st.rerun()
 
         if st.button("Discard screenshot preview", width="stretch"):
@@ -257,5 +273,6 @@ def _render_nfl_actions(preview: ScreenshotPreview, rows: list[dict], prices: di
         return True
     st.session_state.screenshot_saved_snapshot = snapshot
     st.session_state.pop("screenshot_preview", None)
+    _after_confirm(snapshot)
     st.rerun()
     return True

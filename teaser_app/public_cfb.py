@@ -184,7 +184,7 @@ def prepare_cfb_reference(snapshot: dict, adapter, *, now: datetime,
 def build_cfb_public_board(history, adapter, snapshot: dict, *, now: datetime,
                            season: int | None = None, week: int | None = None,
                            prices: dict[str, str] | None = None,
-                           menu_book: str = DEFAULT_TEASER_BOOK):
+                           menu_book: str = DEFAULT_TEASER_BOOK, price_sources: dict | None = None):
     """Build and save once on an explicit operator action, outside the model checkout."""
     from teaser_app.paper_history import run_record
 
@@ -198,7 +198,9 @@ def build_cfb_public_board(history, adapter, snapshot: dict, *, now: datetime,
                   source_snapshot_id=snapshot["snapshot_id"],
                   lines_source=prepared.lines_label,
                   lines_book=prepared.slate["sportsbook"], menu_book=prepared.menu_book,
-                  excluded_games=list(prepared.excluded))
+                  excluded_games=list(prepared.excluded),
+                  # Provenance of the 6-point teaser prices (default / operator / screenshot): hypothetical.
+                  teaser_price_sources=dict(price_sources or snapshot.get("teaser_price_sources") or {}))
     saved = next((prior for prior in reversed(history.runs(league="CFB", status="PAPER"))
                   if prior.get("board_kind") == "cfb_paper_board"
                   and prior.get("source_snapshot_id") == snapshot["snapshot_id"]

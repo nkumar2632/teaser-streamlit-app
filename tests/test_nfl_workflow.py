@@ -284,7 +284,10 @@ def test_streamlit_one_click_confirm_build_then_confirm_recheck(tmp_path, monkey
     history = LocalHistory(tmp_path)
     _patch_history(monkeypatch, history)
     app = AppTest.from_file(APP, default_timeout=30).run()
-    assert next(item for item in app.text_input if item.label == "Sportsbook").value == "bluecoins.ag"
+    assert next(item for item in app.text_input if item.label == "Sportsbook override").value == "bluecoins.ag"
+    assert next(item for item in app.selectbox if item.label == "Screenshot league override").value == "NFL"
+    assert any("League: NFL · LIVE · follows the mode above · Sportsbook: bluecoins.ag" in item.value
+               for item in app.caption)
     app.session_state["screenshot_preview"] = _preview(clock["baseline"], clock["kickoff"])
     app.run()
     assert all(item.label != "Confirm & Recheck Active Proposal" for item in app.button)

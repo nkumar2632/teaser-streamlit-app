@@ -14,8 +14,9 @@ from teaser_app.nfl_market import _stored_prices, execution_book, execution_stat
 from teaser_app.nfl_workflow import (activate_proposal, active_proposal, infer_nfl_week, latest_execution,
                                      recheck_active_proposal, recheck_candidate, release_active, active_context,
                                      restore_active_proposal, workflow_steps)
-from teaser_app.presentation import signed
+from teaser_app.presentation import signed, source_label
 from teaser_app.public_cfb import DEFAULT_TEASER_BOOK
+from teaser_app.screenshot_ingest import DEFAULT_TEASER_MENU
 
 
 def _now() -> datetime:
@@ -143,8 +144,7 @@ def render_saved_nfl_market(adapter, reset_result) -> bool:
     by_id = {record["snapshot_id"]: record for record in snapshots}
     chosen = st.selectbox("Saved NFL market snapshot", tuple(by_id),
                           format_func=lambda key: (
-                              f"{snapshot_role(by_id[key])} · {by_id[key]['captured_at']} · "
-                              f"{by_id[key].get('source_provider') or by_id[key].get('sportsbook') or 'unknown'} · {key}"),
+                              f"{source_label(by_id[key])} · captured {by_id[key]['captured_at']} · {key}"),
                           key="nfl_saved_choice")
     snapshot = by_id[chosen]
     role = snapshot_role(snapshot)
@@ -158,6 +158,9 @@ def render_saved_nfl_market(adapter, reset_result) -> bool:
         week = week if type(week) is int else inferred_week
         if inferred_week is not None:
             st.caption(f"NFL week inferred from kickoffs: {inferred_season} Week {inferred_week}")
+    if (type(season) is not int or not 2000 <= season <= 2100) or (type(week) is not int or not 1 <= week <= 18):
+        st.warning("Could not infer one NFL regular-season week from these kickoffs (games span weeks, "
+                   "or a kickoff is missing). Set the season and week manually for this saved slate.")
     if type(season) is not int or not 2000 <= season <= 2100:
         season = int(st.number_input("NFL season for saved slate", 2000, 2100,
                                      datetime.now(ZoneInfo("America/Detroit")).year,
@@ -174,8 +177,12 @@ def render_saved_nfl_market(adapter, reset_result) -> bool:
             st.caption(f"{size}-team 6-point teaser price: {stored[size]} · saved with snapshot")
         else:
             stored[size] = st.text_input(f"Missing {size}-team 6-point teaser price · optional",
+                                          value=DEFAULT_TEASER_MENU[size],
                                           placeholder="Leave blank if not observed",
                                           key=f"nfl_menu_{size}_{chosen}").strip()
+            if stored[size] == DEFAULT_TEASER_MENU[size]:
+                # An entered price is never an observed quote; only the explicit verification below is.
+                st.caption(f"{size}-team: standard default · not an observed or verified quote")
     prices = {size: str(stored[size] or "").strip() for size in ("2", "3")}
     if role == "EXECUTION" and st.button("I verified these teaser prices are unchanged now",
                                           key=f"nfl_verify_menu_{chosen}", use_container_width=True):

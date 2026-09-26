@@ -238,10 +238,13 @@ def test_cfb_public_streamlit_rerun_keeps_saved_board_and_no_placement(tmp_path,
     next(item for item in app.radio if item.label == "League and model track").set_value("CFB · PAPER").run()
     assert all(item.label != "Add CFB side" for item in app.button)
     assert all(item.label != "Build PAPER card from entered slate" for item in app.button)
-    next(item for item in app.button if item.label == "Use this slate for proposal").click().run()
+    assert any("REFERENCE — ESPN" in item.value for item in app.markdown)  # selected automatically
+    assert [item.value for item in app.text_input if item.label.startswith("Missing")] == ["-110", "+170"]
+    assert any("standard default · not an observed or verified quote · hypothetical" in item.value
+               for item in app.caption)
     next(item for item in app.text_input if item.label.startswith("Missing 2-team")).set_value("+300").run()
     next(item for item in app.text_input if item.label.startswith("Missing 3-team")).set_value("+600").run()
-    next(item for item in app.button if item.label == "Build PAPER card from public slate").click().run()
+    next(item for item in app.button if item.label == "Build CFB PAPER card from this snapshot").click().run()
     assert not app.exception
     runs = history.runs(status="PAPER")
     assert len(runs) == 1
@@ -258,5 +261,5 @@ def test_cfb_public_streamlit_rerun_keeps_saved_board_and_no_placement(tmp_path,
     next(item for item in app.radio if item.label == "CFB market source").set_value("Manual entry").run()
     assert any(item.label == "Build PAPER card from entered slate" for item in app.button)
     next(item for item in app.radio if item.label == "CFB market source").set_value("Public lines").run()
-    assert any(item.label == "Build PAPER card from public slate" for item in app.button)
+    assert any(item.label == "Build CFB PAPER card from this snapshot" for item in app.button)
     assert len(history.runs(status="PAPER")) == 1
