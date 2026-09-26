@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePath
 from typing import Protocol
+from unicodedata import normalize
 from zoneinfo import ZoneInfo
 
 from PIL import Image, UnidentifiedImageError
@@ -82,6 +83,7 @@ class ScreenshotPreview:
     teaser_states: dict
     warnings: tuple[str, ...]
     recognized_text: tuple[str, ...]
+    known_teams: tuple[str, ...] = ()
 
 
 class ScreenshotExtractor(Protocol):
@@ -100,14 +102,93 @@ def _coordinate(value) -> float | None:
 ROW_TOLERANCE = 0.012
 
 
-def layout_rows(lines: list[OCRLine]) -> list[OCRLine]:
-    """Rebuild visual rows from positioned OCR fragments of one screenshot.
+# Board layout: team names sit in a left column; PROPS buttons and market cells sit to the right.
+SPREAD_CELL = re.compile(r"^[+-]\s?\d{1,2}\S{0,3}\s+[+-]\d{3}")
+PROPS_CELL = re.compile(r"^PRO(?:PS?)?$", re.I)
+MARKET_CELL = re.compile(r"[+-]\d{3}|^[OU0]\s?\d", re.I)
+# Thresholds are fractions of the measured row pitch (spacing of consecutive team rows), so they hold
+# for any screenshot height or zoom level.
+LINE_TOLERANCE = 0.35    # fragments of one left-column line (logo text + team name) share a top edge
+ASSIGN_LIMIT = 0.9       # a market cell farther than this from every left-column line is not placed
+ASSIGN_MARGIN = 0.15     # the nearest line must beat the runner-up by this much, else the cell is ambiguous
 
-    A sportsbook board is read column by column (team, spread, total, moneyline), so each
-    row is re-joined left to right before parsing. Unpositioned input is returned unchanged.
+
+def _row_pitch(tops: list[float]) -> float | None:
+    gaps = sorted(b - a for a, b in zip(tops, tops[1:]) if b - a > 0.001)
+    return gaps[len(gaps) // 4] if gaps else None
+
+
+def board_rows(lines: list[OCRLine]) -> tuple[list[OCRLine], list[OCRLine]]:
+    """Rebuild sportsbook rows from positioned fragments of one screenshot.
+
+    Returns (rows, unplaced market cells). When a spread column is visible, every left-column
+    line (team, game header, date header) becomes one row and each cell to its right joins the
+    line whose top edge is nearest; a cell that is too far or equally near two lines is not
+    guessed onto either. Without a visible spread column, fragments are grouped by top edge.
+    Unpositioned input is returned unchanged.
     """
     if not lines or any(line.x is None or line.y is None for line in lines):
-        return list(lines)
+        return list(lines), []
+    spread_cells = [line for line in lines if SPREAD_CELL.match(line.text.strip())]
+    props_x = sorted(line.x for line in lines if PROPS_CELL.match(line.text.strip()))
+    columns = [line.x for line in spread_cells] or props_x
+    team_cells = [line for line in lines if (RECORD.search(line.text) or RANK.search(line.text))
+                  and line.x < min(columns, default=0)]
+    pitch = _row_pitch(sorted(line.y for line in (spread_cells if len(spread_cells) >= 2 else team_cells)))
+    if not columns or pitch is None or (len(spread_cells) < 2 and len(team_cells) < 2):
+        return _tolerance_rows(lines), []
+    spread_x = sorted(line.x for line in spread_cells) or [1.0]
+    boundary = min(spread_x[len(spread_x) // 2],
+                   props_x[len(props_x) // 2] if props_x else 1.0) - 0.01
+    # Team names share one left column; short text starting clearly left of it is a logo read as text.
+    name_x = sorted(line.x for line in team_cells)
+    name_column = name_x[len(name_x) // 2] if name_x else None
+    groups: list[list[OCRLine]] = []
+    for line in sorted((item for item in lines if item.x < boundary), key=lambda item: (-item.y, item.x)):
+        if groups and abs(groups[-1][0].y - line.y) <= LINE_TOLERANCE * pitch:
+            groups[-1].append(line)
+        else:
+            groups.append([line])
+    if not groups:
+        return _tolerance_rows(lines), []
+    tops = [max(group, key=lambda item: len(item.text.strip())).y for group in groups]
+    # Odds never sit on game-time or date header rows, nor on stray logo text: market cells may
+    # only join a left-column line that reads like a team name.
+    joined = [" ".join(item.text for item in group) for group in groups]
+    team_lines = [index for index, text in enumerate(joined)
+                  if re.search(r"[A-Za-z]{3,}", text) and not GAME_HEADER.search(text)
+                  and not DATE_HEADER.search(text)]
+    attached: list[list[OCRLine]] = [[] for _ in groups]
+    unplaced = []
+    for cell in (item for item in lines if item.x >= boundary):
+        market = MARKET_CELL.search(cell.text) is not None
+        ranked = sorted((abs(tops[index] - cell.y), index)
+                        for index in (team_lines if market else range(len(groups))))
+        if not ranked or ranked[0][0] > ASSIGN_LIMIT * pitch or (
+                len(ranked) > 1 and ranked[1][0] - ranked[0][0] < ASSIGN_MARGIN * pitch):
+            if market:
+                unplaced.append(cell)
+            continue
+        attached[ranked[0][1]].append(cell)
+    rows = []
+    for index, (group, top, cells) in enumerate(zip(groups, tops, attached)):
+        if name_column is not None and index in team_lines and any(
+                item.x >= name_column - 0.005 for item in group):
+            group = [item for item in group if not (
+                item.x < name_column - 0.01 and len(re.sub(r"\W", "", item.text)) <= 4)] or group
+        parts = sorted(group, key=lambda item: item.x) + sorted(cells, key=lambda item: item.x)
+        rows.append(OCRLine(" ".join(item.text.strip() for item in parts),
+                            min(item.confidence for item in parts), group[0].source_sha256,
+                            min(item.x for item in group), top))
+    return rows, unplaced
+
+
+def layout_rows(lines: list[OCRLine]) -> list[OCRLine]:
+    """Rebuild visual rows from positioned OCR fragments of one screenshot (see board_rows)."""
+    return board_rows(lines)[0]
+
+
+def _tolerance_rows(lines: list[OCRLine]) -> list[OCRLine]:
     rows: list[list[OCRLine]] = []
     for line in sorted(lines, key=lambda item: (-item.y, item.x)):
         if rows and abs(rows[-1][0].y - line.y) <= ROW_TOLERANCE:
@@ -286,6 +367,58 @@ def _nfl_teams_in(name: str) -> list[str]:
     return [full for full in NFL_NAMES.values() if f" {_clean(full)} " in padded]
 
 
+# CFB team cells carry Bluecoins UI noise around the school name: logo OCR text, a ranking
+# ("#13"), a record ("(3-0)", often read with square brackets), the PROPS button and its counter.
+RANK = re.compile(r"#\s?\d{1,2}\b")
+RECORD = re.compile(r"[(\[{]\s*\d{1,2}\s*-\s*\d{1,2}\s*[)\]}]?")
+BUTTON_TOKEN = re.compile(r"(?i)pro\w*|\d{2,5}\+?|[v⌄˅]")
+
+
+def _team_tokens(name: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]+", normalize("NFKC", name).casefold().replace("&", " and "))
+    return ["st" if token == "state" else token for token in tokens]
+
+
+def _logo_noise(token: str) -> bool:
+    return (not re.search(r"[A-Za-z]", token) or re.search(r"[^A-Za-z&.'-]", token) is not None
+            or len(token) == 1 or (token[0].islower() and len(token) <= 3)
+            or (len(token) == 2 and not token.isupper()))
+
+
+def _clean_cfb_name(raw: str, known: frozenset[tuple[str, ...]]) -> tuple[str, str | None]:
+    """Return (school name, review note or None). Never invents a name that is not in the text."""
+    text = normalize("NFKC", raw)
+    ranks = list(RANK.finditer(text))
+    if ranks:  # anything before the ranking is logo text
+        text = text[ranks[-1].end():]
+    record = RECORD.search(text)
+    if record:  # the record ends the school name; PROPS/counters follow it
+        text = text[:record.start()]
+    tokens = text.split()
+    while tokens and BUTTON_TOKEN.fullmatch(tokens[-1]):
+        tokens.pop()
+    if not tokens:
+        return raw.strip(), "CFB team not recognized in OCR row; review team"
+    if known:
+        for start in range(len(tokens)):
+            suffix = tokens[start:]
+            if tuple(_team_tokens(" ".join(suffix))) in known and all(_logo_noise(t) or len(t) <= 3 for t in tokens[:start]):
+                return " ".join(suffix), None
+    stripped = []
+    while len(tokens) > 1 and _logo_noise(tokens[0]):
+        stripped.append(tokens.pop(0))
+    name = " ".join(tokens).strip(" -–|@")
+    # Symbols, digits or a lowercase start can never begin a school name; a short capitalized
+    # word ("Bg", "W", "St") could, so removing one is flagged for review.
+    if any(re.fullmatch(r"[A-Z][A-Za-z]?", token) for token in stripped):
+        return name, "CFB team name cleaned from logo OCR text; verify team"
+    if not ranks and len(tokens) > 1 and len(tokens[0]) <= 3 and (tokens[0].isupper() or len(tokens) > 2):
+        return name, "Possible logo text in CFB team name; verify team"
+    if known and tuple(_team_tokens(name)) not in known:
+        return name, "CFB team not found in saved ESPN teams; verify team"
+    return name, None
+
+
 def _board_furniture(name: str) -> bool:
     return (not re.search(r"[A-Za-z]{2,}", name) or "$" in name or re.search(r"\d,\d{3}", name) is not None
             or GAME_HEADER.search(name) is not None or name.casefold() in COLUMN_HEADERS)
@@ -312,24 +445,30 @@ def _market_values(text: str) -> dict:
     if ml:
         values["moneyline"] = ml.group(1)
     over = (re.search(r"\bO(?:VER)?\s*([0-9]+(?:\.5)?)(?![0-9./%,½])\s*([+-]\d{3,5})?", text, re.I)
-            # Bluecoins' O renders like a zero: accept "0 42.5 -110" only as a whole total cell.
-            or re.search(r"(?<![\w.+-])0\s+([0-9]{2,3}(?:\.5)?)(?![0-9./%,½])\s+([+-]\d{3,5})", text))
+            # Bluecoins' O renders like a zero ("0 42.5 -110", or glued "042.5 -110"): accept it
+            # only as a whole total cell with a two-digit total and a price.
+            or re.search(r"(?<![\w.+-])0\s?([1-9][0-9](?:\.5)?)(?![0-9./%,½])\s+([+-]\d{3,5})", text))
     under = re.search(r"\bU(?:NDER)?\s*([0-9]+(?:\.5)?)(?![0-9./%,½])\s*([+-]\d{3,5})?", text, re.I)
-    total = over or under or re.search(r"\bTOTAL\s*([0-9]+(?:\.5)?)", text, re.I)
+    # A row has one game-total cell; later total-like cells belong to other markets (e.g. halves).
+    main = min((match for match in (over, under) if match), key=lambda match: match.start(), default=None)
+    total = main or re.search(r"\bTOTAL\s*([0-9]+(?:\.5)?)", text, re.I)
     if total:
         values["total"] = total.group(1)
-    if over and over.group(2):
+    if main is over and over and over.group(2):
         values["over_price"] = over.group(2)
-    if under and under.group(2):
+    if main is under and under and under.group(2):
         values["under_price"] = under.group(2)
     return values
 
 
-def parse_recognized_lines(lines: list[OCRLine], league: str, *,
-                           captured_at: str | None = None) -> tuple[list[dict], dict, dict, list[str]]:
+def parse_recognized_lines(lines: list[OCRLine], league: str, *, captured_at: str | None = None,
+                           known_teams: tuple[str, ...] = ()) -> tuple[list[dict], dict, dict, list[str]]:
     """Conservative layout-agnostic parser; uncertain output always remains reviewable."""
     warnings, team_lines, ignored = [], [], []
     block = 0
+    known = frozenset(tuple(_team_tokens(name)) for name in known_teams if name and _team_tokens(name))
+    source, screen, date_screen = None, -1, None
+    block_screen: dict[int, int] = {}
     try:
         reference = datetime.fromisoformat(captured_at).astimezone(BOARD_ZONE) if captured_at else None
     except (TypeError, ValueError):
@@ -339,15 +478,23 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *,
     teaser_prices = {"2": None, "3": None}
     teaser_states = {"2": "missing", "3": "missing"}
     for line in lines:
+        if line.source_sha256 != source:
+            # A new screenshot never continues the previous screenshot's pairing block.
+            source, screen = line.source_sha256, screen + 1
+            block += 1
+        block_screen[block] = screen
         text = " ".join(line.text.split())
         # Vision commonly inserts a space after a sign or joins spread and price.
         text = _half_points(text)
+        text = re.sub(r"(?<=\d)[v⌄˅](?=\s|$)", "", text)  # dropdown chevron glued to a price
         text = re.sub(r"([+-])\s+(?=\d)", r"\1", text)
         text = re.sub(r"([+-]\d{1,2}(?:\.\d+)?)([+-]\d{3,5})(?!\d)", r"\1 \2", text)
         lower = text.casefold()
         teaser_points = re.search(r"\b(6|10|13)(?:\s*[- ]?point|pt)\b", lower)
         teaser_size = re.search(r"\b([23])\s*[- ]?team\b", lower)
         odds = re.findall(r"[+-]\d{3,5}", text)
+        if re.search(r"\b(?:straight|parlay|if bet|reverse)\b", lower):
+            continue  # sportsbook navigation tabs, not a teaser menu
         if "teaser" in lower:
             if teaser_points and teaser_points.group(1) != "6":
                 warnings.append(f"Ignored non-6-point teaser product: {text[:120]}")
@@ -364,13 +511,15 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *,
             continue
         dated = DATE_HEADER.search(text)
         if dated:
-            board_date = _board_date(dated, reference)
+            board_date, date_screen = _board_date(dated, reference), screen
             if board_date is None:
                 warnings.append(f"Board date could not be resolved; enter kickoffs in review: {dated.group(0)}")
         name = _team_text(text)
         if GAME_HEADER.search(name):
             block += 1  # a new game header: never pair a team row across it
-            block_kickoffs[block] = (_header_kickoff(text, board_date), line)
+            block_screen[block] = screen
+            block_kickoffs[block] = (_header_kickoff(text, board_date), line,
+                                     board_date is not None and date_screen != screen)
             continue
         if dated:
             continue
@@ -386,6 +535,8 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *,
                 else:
                     note = ("No NFL team recognized in OCR row; review team" if not found
                             else "Several NFL teams in one OCR row; review team")
+            elif league == "CFB":
+                name, note = _clean_cfb_name(name, known)
             team_lines.append((name, _market_values(text), line, block, note))
     if ignored:
         warnings.append(f"Ignored {len(ignored)} non-team OCR fragment(s): {', '.join(ignored[:5])}")
@@ -395,7 +546,7 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *,
         pairs.extend(zip(members[0::2], members[1::2]))
         if len(members) % 2:
             warnings.append(f"Unpaired OCR row requires manual review: {members[-1][0]}")
-    candidates = []
+    candidates, inherited_rows = [], []
     for (away, away_values, away_line, pair_block, away_note), (home, home_values, home_line, _, home_note) in pairs:
         if away.casefold() == home.casefold():
             warnings.append(f"Duplicate team OCR row ignored: {away}")
@@ -417,14 +568,18 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *,
             row["conflicts"]["kickoff"] = sorted(kickoffs)
             row["warnings"].append("Conflicting kickoff")
         elif pair_block in block_kickoffs:
-            header_kickoff, header_line = block_kickoffs[pair_block]
+            header_kickoff, header_line, inherited = block_kickoffs[pair_block]
             if header_kickoff:
                 row["kickoff"] = header_kickoff
                 row["field_states"]["kickoff"] = ("high_confidence" if header_line.confidence >= .85
                                                   else "uncertain")
                 row["field_sources"]["kickoff"] = [header_line.source_sha256]
+                if inherited:
+                    inherited_rows.append((block_screen[pair_block], row))
             else:
                 row["warnings"].append("Kickoff header could not be resolved; enter kickoff in review")
+        else:
+            row["warnings"].append("Game header not visible in this screenshot; enter kickoff in review")
         for side, values, source_line in (("away", away_values, away_line), ("home", home_values, home_line)):
             for raw, field in (("spread", f"spread_{side}"), ("spread_price", f"spread_{side}_price"),
                                ("moneyline", f"moneyline_{side}")):
@@ -452,9 +607,30 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *,
                 row["field_states"]["spread_away"] = "uncertain"
                 row["field_states"]["spread_home"] = "uncertain"
         candidates.append(row)
+    _check_carried_dates(candidates, inherited_rows, block_screen, pairs, league, warnings)
     if not candidates:
         warnings.append("No complete games were recognized; add rows manually in review")
     return candidates, teaser_prices, teaser_states, warnings
+
+
+def _check_carried_dates(candidates, inherited_rows, block_screen, pairs, league, warnings) -> None:
+    """A later screenshot without its own date header reuses the previous board date only when it
+    overlaps the previous screenshot (a shared game proves the board is continuous)."""
+    if not inherited_rows:
+        return
+    by_screen: dict[int, set] = {}
+    for (away, _, _, pair_block, _), (home, *_ ) in pairs:
+        key = (team_key(league, away) or away.casefold(), team_key(league, home) or home.casefold())
+        by_screen.setdefault(block_screen[pair_block], set()).add(key)
+    unproven = {screen for screen, _ in inherited_rows
+                if not by_screen.get(screen, set()) & by_screen.get(screen - 1, set())}
+    for screen, row in inherited_rows:
+        if screen in unproven:
+            row["field_states"]["kickoff"] = "uncertain"
+            row["warnings"].append("Board date carried from a previous screenshot without overlap; verify kickoff")
+    if unproven:
+        warnings.append("A screenshot without its own date header does not overlap the previous one; "
+                        "upload screenshots in board order with one shared game")
 
 
 def _same_event(left: dict, right: dict, league: str) -> bool:
@@ -506,8 +682,23 @@ def merge_candidates(candidates: list[dict], league: str) -> list[dict]:
     return merged
 
 
+def known_cfb_teams(history) -> tuple[str, ...]:
+    """School names already on file: ESPN CFB REFERENCE snapshots and operator-confirmed CFB rows."""
+    names = set()
+    for snapshot in history.market_history(league="CFB"):
+        for event in snapshot.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            for field in ("away_school", "home_school", "away_team", "home_team"):
+                value = event.get(field)
+                if isinstance(value, str) and value.strip() and len(value) <= 80:
+                    names.add(" ".join(value.split()))
+    return tuple(sorted(names))
+
+
 def extract_screenshots(files: tuple[ScreenshotFile, ...], league: str, sportsbook: str,
-                        captured_at: str, extractor: ScreenshotExtractor) -> ScreenshotPreview:
+                        captured_at: str, extractor: ScreenshotExtractor, *,
+                        known_teams: tuple[str, ...] = ()) -> ScreenshotPreview:
     if league not in {"NFL", "CFB"}:
         raise ScreenshotIngestError("Choose NFL or CFB")
     if not isinstance(sportsbook, str) or not sportsbook.strip() or len(sportsbook.strip()) > 60:
@@ -519,18 +710,22 @@ def extract_screenshots(files: tuple[ScreenshotFile, ...], league: str, sportsbo
     except (TypeError, ValueError) as exc:
         raise ScreenshotIngestError("Capture time requires an ISO timestamp with UTC offset") from exc
     all_lines, recognized, warnings = [], [], []
+    known_teams = tuple(str(name) for name in known_teams if name)
     for image in files:
-        lines = layout_rows(extractor.extract(image))
+        lines, unplaced = board_rows(extractor.extract(image))
         all_lines.extend(lines)
         recognized.append("\n".join(line.text for line in lines))
         if not lines:
             warnings.append(f"No text recognized in {image.filename}")
+        if unplaced:
+            warnings.append(f"{len(unplaced)} market cell(s) in {image.filename} could not be placed on a "
+                            f"single row and were not used: {', '.join(cell.text for cell in unplaced[:4])}")
     candidates, teaser_prices, teaser_states, parsed_warnings = parse_recognized_lines(
-        all_lines, league, captured_at=captured.isoformat())
+        all_lines, league, captured_at=captured.isoformat(), known_teams=known_teams)
     warnings.extend(parsed_warnings)
     return ScreenshotPreview(league, sportsbook.strip(), captured.isoformat(), datetime.now(timezone.utc).isoformat(),
                              extractor.name, files, tuple(merge_candidates(candidates, league)),
-                             teaser_prices, teaser_states, tuple(warnings), tuple(recognized))
+                             teaser_prices, teaser_states, tuple(warnings), tuple(recognized), known_teams)
 
 
 def reparse_review_text(preview: ScreenshotPreview, texts: list[str]) -> ScreenshotPreview:
@@ -541,7 +736,7 @@ def reparse_review_text(preview: ScreenshotPreview, texts: list[str]) -> Screens
              for image, text in zip(preview.files, texts)
              for line in str(text).splitlines() if line.strip()]
     candidates, prices, states, parse_warnings = parse_recognized_lines(
-        lines, preview.league, captured_at=preview.captured_at)
+        lines, preview.league, captured_at=preview.captured_at, known_teams=preview.known_teams)
     warnings_out = [warning for warning in preview.warnings
                     if not warning.startswith(("No text recognized", "No complete games", "Unpaired OCR"))]
     warnings_out.extend(parse_warnings)
@@ -551,7 +746,7 @@ def reparse_review_text(preview: ScreenshotPreview, texts: list[str]) -> Screens
     return ScreenshotPreview(
         preview.league, preview.sportsbook, preview.captured_at, preview.extracted_at,
         provider, preview.files, tuple(merge_candidates(candidates, preview.league)),
-        prices, states, tuple(warnings_out), tuple(str(text) for text in texts),
+        prices, states, tuple(warnings_out), tuple(str(text) for text in texts), preview.known_teams,
     )
 
 

@@ -154,7 +154,7 @@ def test_conflicting_lines_are_never_silently_selected():
 
 
 def test_uncertain_missing_cutoff_and_impossible_pairing_are_flagged():
-    lines = [OCRLine("JAX +2.5 -110", .61, "a"), OCRLine("DEN -3 -110", .61, "b")]
+    lines = [OCRLine("JAX +2.5 -110", .61, "a"), OCRLine("DEN -3 -110", .61, "a")]
     rows, _, _, warnings = parse_recognized_lines(lines, "NFL")
     assert rows[0]["field_states"]["spread_away"] == "uncertain"
     assert rows[0]["moneyline_away"] is None
@@ -162,6 +162,10 @@ def test_uncertain_missing_cutoff_and_impossible_pairing_are_flagged():
     assert not warnings
     rows, _, _, warnings = parse_recognized_lines([OCRLine("JAX +2.5 -110", .9, "a")], "NFL")
     assert rows == [] and any("Unpaired OCR row" in warning for warning in warnings)
+    # Rows from two different screenshots are never paired into one game.
+    rows, _, _, warnings = parse_recognized_lines(
+        [OCRLine("JAX +2.5 -110", .9, "a"), OCRLine("DEN -2.5 -110", .9, "b")], "NFL")
+    assert rows == [] and sum("Unpaired OCR row" in warning for warning in warnings) == 2
 
 
 def test_teaser_parser_does_not_map_special_products_or_guess_missing_price():
@@ -477,3 +481,162 @@ def test_kickoff_is_left_blank_when_board_headers_cannot_be_resolved(headers, ca
     row = parse_recognized_lines(lines, "NFL", captured_at=captured)[0][0]
     assert row["kickoff"] is None and row["field_states"]["kickoff"] == "missing"
     assert "Kickoff header could not be resolved; enter kickoff in review" in row["warnings"]
+
+
+# Synthetic Bluecoins CFB board (mirrors the observed layout: ~25 px rows on a 2000 px capture,
+# market cells a few px below the team text, logo OCR text, rankings, records, PROPS/counters,
+# O read as 0 and glued to the total, and chevrons glued to prices). No real capture is stored.
+CFB_CAPTURED = "2026-09-25T18:00:00-04:00"
+CFB_FRIDAY = [("08:06 PM EST - FOX",
+               ("Northwestern (2-0)", "PROPS", "+20½ -110", None, "050 -110v", "0 13½ -150"),
+               ("#5 Indiana (3-0)", "470", "-20½ -110", None, "U 50 -110v", "0 35½ -120"))]
+CFB_SATURDAY = [
+    ("12:00 PM EST - ESPN", ("Wake Forest (2-1)", "PROPS", "+12½ -110", "+375", "057 -110v", None, "WF"),
+     ("> #16 Louisville (2-1)", "1423", "-12½ -110", "-550", "U 57 -110v", None)),
+    ("12:00 PM EST - ABC", ("y #1 Texas (3-0)", "PROPS", "-5 -110", "-200", "0 54½ -110v", None),
+     ("#14 Tennessee (3-0)", "698", "+5 -110", "+170", "U 54½ -110v", None, "T")),
+    ("12:00 PM EST", ("Illinois (2-1)", "PROPS", "+26 -110", None, "0 54 -110v", None),
+     ("#7 Ohio St (2-1)", "1088", "-26 -110", None, "U 54 -110v", None)),
+    ("05:00 PM EST", ("Wisconsin (2-1)", "PROPS", "+10 -110", "+310", "0 44 -110v", None),
+     ("#13 Penn St (3-0)", "722", "-10 -110", "-380", "U 44 -110v", None)),
+]
+CFB_EXPECTED = [
+    ("Northwestern", "Indiana", "2026-09-25T20:06:00-04:00", "+20.5", "-20.5", "50"),
+    ("Wake Forest", "Louisville", "2026-09-26T12:00:00-04:00", "+12.5", "-12.5", "57"),
+    ("Texas", "Tennessee", "2026-09-26T12:00:00-04:00", "-5", "+5", "54.5"),
+    ("Illinois", "Ohio St", "2026-09-26T12:00:00-04:00", "+26", "-26", "54"),
+    ("Wisconsin", "Penn St", "2026-09-26T17:00:00-04:00", "+10", "-10", "44"),
+]
+
+
+def _cfb_fragments(sections, sha="cfb", pitch=.0125, top=.97):
+    """sections: [(date header or None, [(game header, away row, home row), ...])]."""
+    lines, y = [], top
+
+    def row(name, button, spread, moneyline, total, extra, logo=None):
+        lines.append(OCRLine(name, .96, sha, .055, y))
+        if logo:  # Vision often returns the team logo as its own short text observation
+            lines.append(OCRLine(logo, .5, sha, .033, y + .1 * pitch))
+        for text, x in ((button, .35), (spread, .40), (moneyline, .58), (total, .72), (extra, .89)):
+            if text:
+                lines.append(OCRLine(text, .95, sha, x, y - .25 * pitch))
+
+    for date_header, games in sections:
+        if date_header:
+            lines.append(OCRLine(date_header, .97, sha, .034, y))
+            lines.append(OCRLine("MAX:", .97, sha, .36, y))
+            y -= pitch
+        for header, away, home in games:
+            lines.append(OCRLine(header, .95, sha, .05, y))
+            y -= pitch
+            row(*away)
+            y -= pitch
+            row(*home)
+            y -= pitch
+    return lines
+
+
+def _positioned_extractor(boards):
+    class Extractor:
+        name = "positioned_fixture"
+
+        def __init__(self):
+            self.boards = iter(boards)
+
+        def extract(self, image):
+            return next(self.boards)
+    return Extractor()
+
+
+def test_cfb_board_on_tight_rows_pairs_every_game_with_clean_names_and_markets():
+    board = _cfb_fragments([("FRIDAY, SEP 25", CFB_FRIDAY), ("SATURDAY, SEP 26", CFB_SATURDAY)])
+    preview = extract_screenshots(checked_files(1), "CFB", "bluecoins.ag", CFB_CAPTURED,
+                                  _positioned_extractor([board]))
+    assert _board_rows(preview.candidates) == CFB_EXPECTED
+    by_away = {row["away_team"]: row for row in preview.candidates}
+    # The first-half total column never replaces the game total.
+    assert by_away["Northwestern"]["under_price"] == "-110" and not by_away["Northwestern"]["conflicts"]
+    assert by_away["Illinois"]["moneyline_away"] is None
+    assert not by_away["Wake Forest"]["warnings"] and by_away["Texas"]["home_team"] == "Tennessee"
+    assert not any("could not be placed" in warning for warning in preview.warnings)
+    snapshot = normalize_screenshot_review(preview, [dict(row) for row in preview.candidates], {"2": "", "3": ""})
+    assert snapshot["league"] == "CFB" and snapshot["market_role"] == "EXECUTION"
+
+
+def test_cfb_board_layout_scales_with_screenshot_height():
+    board = _cfb_fragments([("SATURDAY, SEP 26", CFB_SATURDAY)], pitch=.052, top=.99)
+    preview = extract_screenshots(checked_files(1), "CFB", "bluecoins.ag", CFB_CAPTURED,
+                                  _positioned_extractor([board]))
+    assert _board_rows(preview.candidates) == CFB_EXPECTED[1:]
+
+
+def test_cfb_names_drop_rank_record_props_counter_and_logo_text_but_flag_uncertain_prefixes():
+    lines = [OCRLine(text, .95, "a") for text in (
+        "SATURDAY, SEP 26", "03:30 PM EST - CBS",
+        "(@y #17 Iowa (3-0) PROPS +5½ -110 0 38½ -110", "[a N #18 Michigan (3-0) 1930 -5½ -110 U 38½ -110",
+        "03:30 PM EST", "Bg UNLV (1-2) PROPS -13½ -110 0 52½ -110", "RK Rice (1-2) 386 +13½ -110 U 52½ -110",
+        "04:00 PM EST", "ef Clemson (2-1) PROPS -2½ -110 0 51½ -110", "&* South Alabama (2-1) 424 +2½ -110 U 51½ -110")]
+    rows = parse_recognized_lines(lines, "CFB", captured_at=CFB_CAPTURED)[0]
+    assert [(row["away_team"], row["home_team"]) for row in rows] == [
+        ("Iowa", "Michigan"), ("UNLV", "RK Rice"), ("Clemson", "South Alabama")]
+    assert rows[2]["warnings"] == []  # symbol/lowercase logo text is removed with certainty
+    assert rows[0]["field_states"]["away_team"] == rows[0]["field_states"]["home_team"] == "high_confidence"
+    assert "CFB team name cleaned from logo OCR text; verify team" in rows[1]["warnings"]
+    assert "Possible logo text in CFB team name; verify team" in rows[1]["warnings"]
+    assert rows[1]["field_states"]["home_team"] == "uncertain"
+
+
+def test_saved_team_names_resolve_logo_prefixes_without_shortening_real_names():
+    known = ("Rice", "UL Lafayette", "Ohio", "Miami (OH)", "Miami Ohio")
+    lines = [OCRLine(text, .95, "a") for text in (
+        "SATURDAY, SEP 26", "03:30 PM EST", "RK Rice (1-2) +13 -110 0 44 -110",
+        "UL Lafayette (2-1) -13 -110 U 44 -110", "04:00 PM EST", "Connecticut (2-1) +3½ -110 0 52 -110",
+        "BN Miami Ohio 965 -3½ -110 U 52 -110")]
+    rows = parse_recognized_lines(lines, "CFB", captured_at=CFB_CAPTURED, known_teams=known)[0]
+    assert [(row["away_team"], row["home_team"]) for row in rows] == [
+        ("Rice", "UL Lafayette"), ("Connecticut", "Miami Ohio")]
+    assert rows[0]["warnings"] == [] or all("team" not in warning for warning in rows[0]["warnings"])
+    # "Miami" is a real word, so "Miami Ohio" is never shortened to the known school "Ohio".
+    lines[-1] = OCRLine("Miami Ohio 965 -3½ -110 U 52 -110", .95, "a")
+    rows = parse_recognized_lines(lines, "CFB", captured_at=CFB_CAPTURED, known_teams=("Ohio",))[0]
+    assert rows[1]["home_team"] == "Miami Ohio"
+    assert "CFB team not found in saved ESPN teams; verify team" in rows[1]["warnings"]
+
+
+def test_continuous_cfb_screenshots_merge_overlap_and_never_pair_across_images():
+    first = _cfb_fragments([("SATURDAY, SEP 26", CFB_SATURDAY[:3])], sha="one")
+    # The second screenshot starts with the last home row of the previous game (orphan), then
+    # repeats the Illinois game and continues without its own date header.
+    second = [OCRLine("#14 Tennessee (3-0) 698 +5 -110 U 54½ -110v", .95, "two", .055, .99)]
+    second += _cfb_fragments([(None, CFB_SATURDAY[2:])], sha="two", top=.975)
+    preview = extract_screenshots(checked_files(2), "CFB", "bluecoins.ag", CFB_CAPTURED,
+                                  _positioned_extractor([first, second]))
+    assert _board_rows(preview.candidates) == CFB_EXPECTED[1:]
+    assert any("Unpaired OCR row requires manual review: Tennessee" in warning for warning in preview.warnings)
+    assert all(row["field_states"]["kickoff"] == "high_confidence" for row in preview.candidates)
+
+
+def test_screenshot_without_date_or_overlap_keeps_carried_kickoff_uncertain():
+    first = _cfb_fragments([("SATURDAY, SEP 26", CFB_SATURDAY[:1])], sha="one")
+    second = _cfb_fragments([(None, CFB_SATURDAY[3:])], sha="two")
+    preview = extract_screenshots(checked_files(2), "CFB", "bluecoins.ag", CFB_CAPTURED,
+                                  _positioned_extractor([first, second]))
+    penn = next(row for row in preview.candidates if row["home_team"] == "Penn St")
+    assert penn["kickoff"] == "2026-09-26T17:00:00-04:00"
+    assert penn["field_states"]["kickoff"] == "uncertain"
+    assert any("without overlap" in warning for warning in penn["warnings"])
+
+
+def test_ambiguous_or_unreadable_cfb_cells_are_left_blank_not_guessed():
+    board = _cfb_fragments([("SATURDAY, SEP 26", CFB_SATURDAY[3:])])
+    wisconsin = next(line for line in board if line.text.startswith("Wisconsin"))
+    penn = next(line for line in board if line.text.startswith("#13 Penn"))
+    midway = (wisconsin.y + penn.y) / 2
+    board = [line for line in board if line.text != "+10 -110"]
+    board.append(OCRLine("+10 -110", .95, "cfb", .40, midway))           # equally near both rows
+    board = [OCRLine("-B% -110", .95, "cfb", .40, line.y) if line.text == "-10 -110" else line for line in board]
+    preview = extract_screenshots(checked_files(1), "CFB", "bluecoins.ag", CFB_CAPTURED,
+                                  _positioned_extractor([board]))
+    row = preview.candidates[0]
+    assert (row["spread_away"], row["spread_home"], row["total"]) == (None, None, "44")
+    assert any("could not be placed" in warning and "+10 -110" in warning for warning in preview.warnings)

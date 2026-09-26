@@ -17,6 +17,7 @@ from teaser_app.screenshot_ingest import (
     ScreenshotIngestError,
     ScreenshotPreview,
     extract_screenshots,
+    known_cfb_teams,
     reparse_review_text,
     save_confirmed_execution,
     validate_uploads,
@@ -91,17 +92,18 @@ def render_screenshot_import() -> None:
             _clear()
             try:
                 files = validate_uploads([(item.name, item.type, item.getvalue()) for item in uploads])
+                known = known_cfb_teams(LocalHistory()) if league == "CFB" else ()
                 try:
                     preview = extract_screenshots(files, league, sportsbook, captured_at,
-                                                  AppleVisionExtractor())
+                                                  AppleVisionExtractor(), known_teams=known)
                 except ScreenshotIngestError as ocr_error:
                     preview = extract_screenshots(files, league, sportsbook, captured_at,
-                                                  ManualTextExtractor())
+                                                  ManualTextExtractor(), known_teams=known)
                     preview = ScreenshotPreview(
                         preview.league, preview.sportsbook, preview.captured_at,
                         preview.extracted_at, preview.extractor, preview.files,
                         preview.candidates, preview.teaser_prices, preview.teaser_states,
-                        (str(ocr_error), *preview.warnings), preview.recognized_text,
+                        (str(ocr_error), *preview.warnings), preview.recognized_text, preview.known_teams,
                     )
                 st.session_state.screenshot_preview = preview
             except ScreenshotIngestError as exc:
