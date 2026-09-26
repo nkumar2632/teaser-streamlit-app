@@ -33,7 +33,7 @@ def _screenshot_snapshot(history, league="CFB", now=None, prices=("-110", "+170"
         (f"Wisconsin (2-1) {kickoff} +10 -110 O 44 -110", f"#13 Penn St (3-0) {kickoff} -10 -110 U 44 -110"),
         (f"Illinois (2-1) {kickoff} +26 -110 O 54 -110", f"#7 Ohio St (2-1) {kickoff} -26 -110 U 54 -110"),
         (f"Delaware (2-1) {kickoff} +20½ -110 O 52½ -110", f"Virginia (2-1) {kickoff} -20½ -110 U 52½ -110"),
-        # Spread unreadable on the board: the game is kept for review but cannot enter the card.
+        # Spread unreadable on the board: excluded at confirmation, never on the card.
         (f"Rice (1-2) {kickoff} O 44 -110", f"Fresno St (2-1) {kickoff} U 44 -110"),
     ]
     if league == "NFL":
@@ -79,8 +79,9 @@ def test_confirmed_cfb_screenshot_builds_a_paper_card_with_screenshot_provenance
     assert view.strategy.status == "PAPER"
     assert prepared.slate["source"] == "user_screenshot" and prepared.lines_label == "bluecoins.ag screenshot"
     assert prepared.slate["prices"] == {"2": "-110", "3": "+170"}  # the confirmed screenshot menu
-    assert [game["game"] for game in prepared.excluded] == ["Rice at Fresno St"]
-    assert prepared.excluded[0]["reason"] == "NO_ODDS"
+    assert prepared.excluded == ()
+    assert snapshot["excluded_review_rows"] == [
+        {"row": 4, "game": "Rice at Fresno St", "reason": "Row 4 has no spread on either side"}]
     assert {side["team"] for side in prepared.slate["rows"]} >= {"Wisconsin", "Penn St", "Delaware", "Virginia"}
     assert saved["board_kind"] == "cfb_paper_board" and saved["lines_source"] == "bluecoins.ag screenshot"
     assert history.live_placements() == []

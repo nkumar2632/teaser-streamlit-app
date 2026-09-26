@@ -305,7 +305,7 @@ def test_cfb_confirmation_excludes_malformed_or_duplicate_rows_instead_of_failin
     files = checked_files()
     preview = extract_screenshots(
         files, "CFB", "My Book", CAPTURED,
-        FixtureExtractor([[("Texas +2.5 -110", .99), ("Tennessee -2.5 -110", .99)]]),
+        FixtureExtractor([[("Texas +2.5 -110 O 50 -110", .99), ("Tennessee -2.5 -110 U 50 -110", .99)]]),
     )
     rows = complete_rows(preview)
     rows[0]["moneyline_away"] = "EVEN"
@@ -632,8 +632,90 @@ def test_continuous_cfb_screenshots_merge_overlap_and_never_pair_across_images()
     preview = extract_screenshots(checked_files(2), "CFB", "bluecoins.ag", CFB_CAPTURED,
                                   _positioned_extractor([first, second]))
     assert _board_rows(preview.candidates) == CFB_EXPECTED[1:]
-    assert any("Unpaired OCR row requires manual review: Tennessee" in warning for warning in preview.warnings)
+    assert any("Continuation row at the top of a screenshot is not paired" in warning and warning.endswith("Tennessee")
+               for warning in preview.warnings)
     assert all(row["field_states"]["kickoff"] == "high_confidence" for row in preview.candidates)
+
+
+# The real Apple Vision boundary that produced shifted pairs (New Mexico St vs Houston, Georgia
+# Southern vs Vanderbilt, ...): screenshot 1 ends after an away row; screenshot 2 starts with that
+# game's home row and reads every game header with its expand icon as "+ HH:MM PM EST".
+BOUNDARY_GAMES = [
+    ("+ 07:30 PM EST - ESPN2", ("Houston (2-1)", "PROPS", "-3 -110", "-150", "0 55 -110v", None),
+     ("Georgia Southern (1-2)", "512", "+3 -110", "+130", "U 55 -110v", None)),
+    ("+ 07:30 PM EST - SECN", ("Vanderbilt (2-1)", "PROPS", "+7½ -110", "+250", "0 47½ -110v", None),
+     ("Auburn (2-1)", "733", "-7½ -110", "-310", "U 47½ -110v", None)),
+    ("alee +08:00 PM EST - BTN", ("Nebraska (3-0)", "PROPS", "-6 -110", "-230", "0 49 -110v", None),
+     ("Michigan St (2-1)", "640", "+6 -110", "+190", "U 49 -110v", None)),
+    ("+ 08:00 PM EST", ("South Florida (2-1)", "PROPS", "+2½ -110", "+120", "0 58 -110v", None),
+     ("Memphis (3-0)", "455", "-2½ -110", "-140", "U 58 -110v", None)),
+]
+BOUNDARY_PAIRS = [("Houston", "Georgia Southern"), ("Vanderbilt", "Auburn"), ("Nebraska", "Michigan St"),
+                  ("South Florida", "Memphis")]
+
+
+def _new_mexico_boundary(overlap: bool):
+    new_mexico = ("+ 07:00 PM EST - CBSSN", ("New Mexico (1-2)", "PROPS", "+4 -110", "+160", "0 52 -110v", None),
+                  ("New Mexico St (1-2)", "388", "-4 -110", "-190", "U 52 -110v", None))
+    first = _cfb_fragments([("SATURDAY, SEP 26", [new_mexico])], sha="one")
+    home_y = next(line.y for line in first if line.text.startswith("New Mexico St"))
+    first = [line for line in first if line.y > home_y + .0125 / 2]  # screenshot 1 ends after the away row
+    if overlap:
+        second = _cfb_fragments([(None, [new_mexico] + BOUNDARY_GAMES)], sha="two")
+    else:
+        second = [OCRLine("New Mexico St (1-2) 388 -4 -110 U 52 -110v", .95, "two", .055, .99)]
+        second += _cfb_fragments([(None, BOUNDARY_GAMES)], sha="two", top=.975)
+    return extract_screenshots(checked_files(2), "CFB", "bluecoins.ag", CFB_CAPTURED,
+                               _positioned_extractor([first, second]))
+
+
+def test_plus_icon_game_headers_split_pairs_and_stamp_kickoffs():
+    lines = [OCRLine(text, .95, "a") for text in (
+        "SATURDAY, SEP 26", "+ 07:30 PM EST - ESPN2", "Houston (2-1) -3 -110 0 55 -110",
+        "Georgia Southern (1-2) +3 -110 U 55 -110", "alee +08:00 PM EST", "Nebraska (3-0) -6 -110 0 49 -110",
+        "Michigan St (2-1) +6 -110 U 49 -110")]
+    rows = parse_recognized_lines(lines, "CFB", captured_at=CFB_CAPTURED)[0]
+    assert [(row["away_team"], row["home_team"], row["kickoff"]) for row in rows] == [
+        ("Houston", "Georgia Southern", "2026-09-26T19:30:00-04:00"),
+        ("Nebraska", "Michigan St", "2026-09-26T20:00:00-04:00")]
+
+
+def test_continuation_row_at_a_screenshot_boundary_never_shifts_the_next_pairs():
+    preview = _new_mexico_boundary(overlap=False)
+    assert [(row["away_team"], row["home_team"]) for row in preview.candidates] == BOUNDARY_PAIRS
+    teams = {(row["away_team"], row["home_team"]) for row in preview.candidates}
+    for shifted in (("New Mexico St", "Houston"), ("Georgia Southern", "Vanderbilt"), ("Auburn", "Nebraska"),
+                    ("Michigan St", "South Florida"), ("New Mexico", "New Mexico St")):
+        assert shifted not in teams  # no pairing across the boundary without proof from overlap
+    assert any("Continuation row at the top of a screenshot is not paired" in warning
+               and warning.endswith("New Mexico St") for warning in preview.warnings)
+    assert any("Unpaired OCR row requires manual review: New Mexico" in warning for warning in preview.warnings)
+    assert all(row["kickoff"] for row in preview.candidates)
+
+
+def test_overlapping_boundary_screenshots_pair_the_split_game_once_from_the_overlap():
+    preview = _new_mexico_boundary(overlap=True)
+    assert [(row["away_team"], row["home_team"]) for row in preview.candidates] == [
+        ("New Mexico", "New Mexico St"), *BOUNDARY_PAIRS]
+    kickoffs = {row["away_team"]: row["kickoff"] for row in preview.candidates}
+    assert kickoffs["New Mexico"] == "2026-09-26T19:00:00-04:00"
+    assert kickoffs["Nebraska"] == "2026-09-26T20:00:00-04:00"
+    assert not any("Continuation row" in warning for warning in preview.warnings)
+
+
+def test_cfb_rows_without_a_spread_or_total_are_excluded_but_one_sided_spreads_are_kept(tmp_path):
+    kickoff = "2026-09-26T19:30:00-04:00"
+    preview = extract_screenshots(checked_files(1), "CFB", "bluecoins.ag", CFB_CAPTURED, FixtureExtractor([[
+        (f"Houston {kickoff} -3 -110 O 55 -110", .99), (f"Georgia Southern {kickoff} U 55 -110", .99),
+        (f"Vanderbilt {kickoff} O 47.5 -110", .99), (f"Auburn {kickoff} U 47.5 -110", .99),
+        (f"Nebraska {kickoff} -6 -110", .99), (f"Michigan St {kickoff} +6 -110", .99)]]))
+    saved = save_confirmed_execution(preview, complete_rows(preview), {"2": "-110", "3": "+170"},
+                                     LocalHistory(tmp_path))
+    assert [(event["away_team"], event["spread_away"], event["spread_home"]) for event in saved["events"]] == [
+        ("Houston", "-3", None)]  # the unread Georgia Southern side is not invented
+    assert saved["excluded_review_rows"] == [
+        {"row": 2, "game": "Vanderbilt at Auburn", "reason": "Row 2 has no spread on either side"},
+        {"row": 3, "game": "Nebraska at Michigan St", "reason": "Row 3 has no game total"}]
 
 
 def test_screenshot_without_date_or_overlap_keeps_carried_kickoff_uncertain():

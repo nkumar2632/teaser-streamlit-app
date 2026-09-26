@@ -419,6 +419,13 @@ def _clean_cfb_name(raw: str, known: frozenset[tuple[str, ...]]) -> tuple[str, s
     return name, None
 
 
+def _is_game_header(text: str) -> bool:
+    """A game-time header, even when an expand icon is read before it ("+ 04:00 PM EST")."""
+    core = re.sub(r"^[^A-Za-z0-9]+", "", " ".join(str(text).split()))
+    core = re.sub(r"[+-]\s*(?=\d{1,2}:\d{2}\b)", "", core)  # the icon's "+" is not a spread sign
+    return GAME_HEADER.search(_team_text(core)) is not None
+
+
 def _board_furniture(name: str) -> bool:
     return (not re.search(r"[A-Za-z]{2,}", name) or "$" in name or re.search(r"\d,\d{3}", name) is not None
             or GAME_HEADER.search(name) is not None or name.casefold() in COLUMN_HEADERS)
@@ -477,12 +484,22 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *, captured_at: st
     block_kickoffs: dict[int, tuple[str | None, OCRLine]] = {}
     teaser_prices = {"2": None, "3": None}
     teaser_states = {"2": "missing", "3": "missing"}
+    # Screens that show game headers: rows above their first header continue the previous screenshot.
+    screens_with_headers, index, previous = set(), -1, None
+    for line in lines:
+        if line.source_sha256 != previous:
+            previous, index = line.source_sha256, index + 1
+        if _is_game_header(line.text):
+            screens_with_headers.add(index)
+    orphan_blocks: set[int] = set()
+    leading = False
     for line in lines:
         if line.source_sha256 != source:
             # A new screenshot never continues the previous screenshot's pairing block.
             source, screen = line.source_sha256, screen + 1
             block += 1
-        block_screen[block] = screen
+            leading = screen > 0 and screen in screens_with_headers
+        block_screen.setdefault(block, screen)
         text = " ".join(line.text.split())
         # Vision commonly inserts a space after a sign or joins spread and price.
         text = _half_points(text)
@@ -515,8 +532,9 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *, captured_at: st
             if board_date is None:
                 warnings.append(f"Board date could not be resolved; enter kickoffs in review: {dated.group(0)}")
         name = _team_text(text)
-        if GAME_HEADER.search(name):
+        if _is_game_header(text):
             block += 1  # a new game header: never pair a team row across it
+            leading = False
             block_screen[block] = screen
             block_kickoffs[block] = (_header_kickoff(text, board_date), line,
                                      board_date is not None and date_screen != screen)
@@ -537,12 +555,22 @@ def parse_recognized_lines(lines: list[OCRLine], league: str, *, captured_at: st
                             else "Several NFL teams in one OCR row; review team")
             elif league == "CFB":
                 name, note = _clean_cfb_name(name, known)
+            if leading:
+                # Rows above a later screenshot's first game header continue a game from the previous
+                # screenshot. They are never paired here: with overlapping screenshots that game is
+                # already complete there, and without overlap nothing proves which game they belong to.
+                orphan_blocks.add(block)
             team_lines.append((name, _market_values(text), line, block, note))
     if ignored:
         warnings.append(f"Ignored {len(ignored)} non-team OCR fragment(s): {', '.join(ignored[:5])}")
     pairs = []
     for current in sorted({entry[3] for entry in team_lines}):
         members = [entry for entry in team_lines if entry[3] == current]
+        if current in orphan_blocks:
+            for entry in members:
+                warnings.append(f"Continuation row at the top of a screenshot is not paired (its game "
+                                f"header is in the previous screenshot): {entry[0]}")
+            continue
         pairs.extend(zip(members[0::2], members[1::2]))
         if len(members) % 2:
             warnings.append(f"Unpaired OCR row requires manual review: {members[-1][0]}")
@@ -848,6 +876,10 @@ def normalize_screenshot_review(preview: ScreenshotPreview, edited_rows: list[di
                 raise ScreenshotIngestError("Duplicate reviewed event")
             if any((team, identity[2]) in teams_at_time for team in identity[:2]):
                 raise ScreenshotIngestError(f"Row {position} repeats a team at the same kickoff")
+            if exclude and record["spread_away"] is None and record["spread_home"] is None:
+                raise ScreenshotIngestError(f"Row {position} has no spread on either side")
+            if exclude and record["total"] is None:
+                raise ScreenshotIngestError(f"Row {position} has no game total")
         except ScreenshotIngestError as exc:
             if not exclude:
                 raise
